@@ -24,7 +24,7 @@ Overall security posture is **GOOD**. All high and medium priority findings have
 
 Server Actions are public HTTP endpoints. Before this fix, `processChat` and `getSlashCommands` ran for any caller on the internet, read ConnectWise tickets, notes and configurations with the integration key, and called the LLM. The "Pod Mode Only" screen only blocked the browser view.
 
-Every action now calls `requireMember()` in `src/lib/session.ts` first. It proves the Hosted API memberId, memberHash and memberContext with a ConnectWise API call before any ticket data is read. Server Action input is checked with Zod, and Next.js is pinned to 15.5.27. If you run TicketWise, update to this version.
+Every action now calls `requireMember()` in `src/lib/session.ts` first. It proves the Hosted API memberId, memberHash and memberContext with a call to `/system/myMembers/info`, and the identifier ConnectWise returns must match the claimed memberId, before any ticket data is read. Server Action input is checked with Zod, and Next.js is pinned to 15.5.27. If you run TicketWise, update to this version.
 
 ### ✅ PostMessage Origin Validation (was HIGH)
 

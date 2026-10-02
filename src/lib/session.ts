@@ -10,10 +10,12 @@ import { env } from "./env";
  * them with ConnectWise before it touches CW data or the LLM.
  *
  * ConnectWise documents two ways to authenticate with a Hosted API memberHash:
- *   - Cookie auth: companyName, memberId and memberHash cookies
+ *   - Cookie auth: companyName, memberId, memberHash and memberContext cookies
  *   - Basic auth:  base64("<companyId>+<memberId>:<memberHash>")
- * We call a cheap endpoint (/system/info) with each in turn. CW returns 401
- * for a wrong or expired hash, so a 200 proves the pair is genuine.
+ * We call /system/myMembers/info with each in turn. CW returns 401 for a wrong
+ * or expired hash. A 200 also names the member the session belongs to, and
+ * that identifier must match the memberId the caller claimed, so one member's
+ * hash cannot be presented under a colleague's memberId.
  *
  * The company always comes from server env (CW_COMPANY_ID), never from the
  * client, so a member of another CW tenant on the same host cannot get in.
@@ -153,13 +155,17 @@ function buildHeaders(method: Method, c: MemberCredentials): Record<string, stri
   return headers;
 }
 
-/** Returns the HTTP status from CW, or 0 on a network error or timeout. */
-async function tryMethod(method: Method, c: MemberCredentials): Promise<number> {
-  return (await callCw(method, c)).status;
+interface CwCheck {
+  /** HTTP status from CW, 0 on a network error or timeout, 403 on an identity mismatch. */
+  status: number;
+  code: string;
+  /** The member CW says the session belongs to (only on a matching 200). */
+  identifier?: string;
 }
 
-async function callCw(method: Method, c: MemberCredentials): Promise<{ status: number; code: string }> {
-  const url = `https://${env.CW_COMPANY_URL}/${env.CW_CODE_BASE}/apis/3.0/system/info`;
+/** Ask CW who the session belongs to, and require it to be the claimed member. */
+async function callCw(method: Method, c: MemberCredentials): Promise<CwCheck> {
+  const url = `https://${env.CW_COMPANY_URL}/${env.CW_CODE_BASE}/apis/3.0/system/myMembers/info`;
   try {
     const res = await fetch(url, {
       headers: buildHeaders(method, c),
@@ -176,10 +182,14 @@ async function callCw(method: Method, c: MemberCredentials): Promise<{ status: n
       } catch {
         code = body.slice(0, 80).replace(/\s+/g, " ");
       }
-    } else {
-      await res.arrayBuffer().catch(() => undefined);
+      return { status: res.status, code };
     }
-    return { status: res.status, code };
+    const info = (await res.json().catch(() => null)) as { identifier?: unknown } | null;
+    const identifier = typeof info?.identifier === "string" ? info.identifier : "";
+    if (!identifier || identifier.toLowerCase() !== c.memberId.toLowerCase()) {
+      return { status: 403, code: `identity mismatch: CW says ${identifier || "(none)"}` };
+    }
+    return { status: 200, code: "", identifier };
   } catch {
     return { status: 0, code: "network" };
   }
@@ -208,13 +218,13 @@ function describe(c: MemberCredentials): string {
 const described = new Set<string>();
 
 /** After a clear rejection, try the other documented cookie forms and log what CW says. */
-async function diagnose(c: MemberCredentials): Promise<Method | null> {
+async function diagnose(c: MemberCredentials): Promise<{ method: Method; identifier: string } | null> {
   const results: string[] = [];
-  let winner: Method | null = null;
+  let winner: { method: Method; identifier: string } | null = null;
   for (const method of ["cookie-encoded", "cookie-no-context"] as Method[]) {
-    const { status, code } = await callCw(method, c);
+    const { status, code, identifier } = await callCw(method, c);
     results.push(`${method}=${status}${code ? `(${code})` : ""}`);
-    if (status === 200 && !winner) winner = method;
+    if (status === 200 && identifier && !winner) winner = { method, identifier };
   }
   console.warn(`[auth] diagnose member ${c.memberId}: ${describe(c)} ${results.join(" ")}`);
   return winner;
@@ -251,20 +261,22 @@ export async function verifyMember(c: MemberCredentials): Promise<VerifiedMember
 
   const order: Method[] = preferredMethod === "cookie" ? ["cookie", "basic"] : ["basic", "cookie"];
   const statuses: number[] = [];
+  const codes: string[] = [];
 
   for (const method of order) {
-    const status = await tryMethod(method, c);
+    const { status, code, identifier } = await callCw(method, c);
     statuses.push(status);
-    if (status === 200) {
+    if (code) codes.push(code);
+    if (status === 200 && identifier) {
       preferredMethod = method;
-      verified.set(key, { memberId: c.memberId, expires: now + POSITIVE_TTL_MS });
+      verified.set(key, { memberId: identifier, expires: now + POSITIVE_TTL_MS });
       trim(verified);
-      console.info(`[auth] member ${c.memberId} verified with ConnectWise (${method})`);
-      if (!described.has(c.memberId.toLowerCase())) {
-        described.add(c.memberId.toLowerCase());
-        console.info(`[auth] shape for ${c.memberId}: ${describe(c)}`);
+      console.info(`[auth] member ${identifier} verified with ConnectWise (${method}, identity matched)`);
+      if (!described.has(identifier.toLowerCase())) {
+        described.add(identifier.toLowerCase());
+        console.info(`[auth] shape for ${identifier}: ${describe(c)}`);
       }
-      return { memberId: c.memberId };
+      return { memberId: identifier };
     }
   }
 
@@ -273,18 +285,20 @@ export async function verifyMember(c: MemberCredentials): Promise<VerifiedMember
   if (statuses.every((s) => s === 401 || s === 403)) {
     const alt = await diagnose(c);
     if (alt) {
-      // CW accepted the same credentials in another documented cookie form,
-      // so the member is genuine.
-      verified.set(key, { memberId: c.memberId, expires: now + POSITIVE_TTL_MS });
+      // CW accepted the same credentials in another documented cookie form
+      // and named the claimed member, so the member is genuine.
+      verified.set(key, { memberId: alt.identifier, expires: now + POSITIVE_TTL_MS });
       trim(verified);
-      console.info(`[auth] member ${c.memberId} verified with ConnectWise (${alt})`);
-      return { memberId: c.memberId };
+      console.info(`[auth] member ${alt.identifier} verified with ConnectWise (${alt.method}, identity matched)`);
+      return { memberId: alt.identifier };
     }
     recordFailure(c.memberId);
     rejected.set(key, now + NEGATIVE_TTL_MS);
     trim(rejected);
   }
-  console.warn(`[auth] member ${c.memberId} not verified (CW status ${statuses.join(",")})`);
+  console.warn(
+    `[auth] member ${c.memberId} not verified (CW status ${statuses.join(",")})${codes.length ? ` ${codes.join(" | ")}` : ""}`
+  );
   throw new AuthError();
 }
 

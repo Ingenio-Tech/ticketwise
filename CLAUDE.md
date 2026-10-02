@@ -16,7 +16,7 @@ The app requires a ConnectWise iframe context to authenticate. Running standalon
 
 - **Client components** (`pod.tsx`, `chat.tsx`, `use-hosted-api.ts`): UI and CW postMessage handshake
 - **Server actions** (`actions/auth.ts`, `actions/chat.ts`): cookie management, chat, AI calls. Every exported action is callable by anyone on the internet, so each one that reaches CW or the LLM must call `requireMember()` from `lib/session.ts` first. `actions/ticket.ts` holds plain server helpers (not `"use server"`), so they are not callable from the browser.
-- **Member check** (`lib/session.ts`): proves the Hosted API memberId/memberHash/memberContext with a CW call to `/system/info` (cookie auth), company always from `CW_COMPANY_ID`. Good results are cached 5 minutes; bad ones 1 minute, with per-member and global failure limits.
+- **Member check** (`lib/session.ts`): proves the Hosted API memberId/memberHash/memberContext with a CW call to `/system/myMembers/info` (cookie auth) and requires the identifier CW returns to match the claimed memberId. Company always from `CW_COMPANY_ID`. CW needs the memberContext cookie for browser sessions. Good results are cached 5 minutes; bad ones 1 minute, with per-member and global failure limits.
 - **Libraries** (`lib/ai.ts`, `lib/connectwise.ts`, `lib/env.ts`, `lib/format.ts`): OpenRouter client, CW REST client, env validation, data formatting
 
 AI calls go through OpenRouter via the OpenAI-compatible SDK (`openai` npm package with `baseURL: "https://openrouter.ai/api/v1"`).
@@ -55,7 +55,9 @@ Edit `SYSTEM_PROMPT` in `src/lib/ai.ts`. The prompt enforces British English, Ma
 
 ## Testing
 
-No automated tests currently. Manual testing requires a ConnectWise PSA instance with:
+`npx tsx tests/session-identity.test.mts` checks the member check against a mocked ConnectWise (identity match, memberContext, refusals). Run it after any change to `lib/session.ts`.
+
+Other testing is manual and requires a ConnectWise PSA instance with:
 1. A Hosted API entry pointing to the app URL
 2. At least one service ticket with notes
 3. Valid CW API credentials in `.env`
