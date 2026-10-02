@@ -3,7 +3,7 @@
 import { cookies } from "next/headers";
 import { z } from "zod";
 import { env } from "@/lib/env";
-import { AuthError, requireMember, verifyMember } from "@/lib/session";
+import { AuthError, logSafe, requireMember, verifyMember } from "@/lib/session";
 
 const COOKIE_NAMES = ["memberContext", "memberId", "memberHash", "companyName", "memberEmail", "codeBase"] as const;
 
@@ -53,9 +53,11 @@ export async function setAuthCookies(auth: unknown): Promise<AuthResult> {
       memberContext: data.memberContext,
     });
   } catch (err) {
-    // Non-secret context to diagnose rejected sign-ins.
+    // Non-secret context to diagnose rejected sign-ins. These values come
+    // from the client unchecked, so logSafe stops them faking log lines.
     console.warn(
-      `[auth] sign-in rejected for ${data.memberid}: site=${data.site ?? "-"} codeBase=${data.codeBase ?? "-"} ` +
+      `[auth] sign-in rejected for ${logSafe(data.memberid)}: site=${logSafe(data.site ?? "-")} ` +
+        `codeBase=${logSafe(data.codeBase ?? "-")} ` +
         `companyMatch=${data.companyid.toLowerCase() === env.CW_COMPANY_ID.toLowerCase()}`
     );
     await deleteAuthCookies();

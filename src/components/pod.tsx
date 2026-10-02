@@ -75,6 +75,14 @@ export function Pod({ ticketId: propTicketId, screen: propScreen }: PodProps) {
     [auth]
   );
 
+  // A Server Action said the ConnectWise session expired (CW 401 or a failed
+  // re-check). The server has already dropped it; ask ConnectWise for fresh
+  // credentials, which handleAuth verifies as on first load.
+  const handleAuthExpired = useCallback(() => {
+    setIsAuthenticated(false);
+    requestAuth();
+  }, [requestAuth]);
+
   // Derive ticket ID from screen object or props
   const ticketId = screenObject?.id ? Number(screenObject.id) : propTicketId;
   const screen = screenObject?.screen || propScreen || "ticket";
@@ -196,7 +204,12 @@ export function Pod({ ticketId: propTicketId, screen: propScreen }: PodProps) {
 
   return (
     <div className="h-full">
-      <Chat ticketId={ticketId} isAuthenticated={isAuthenticated} credentials={credentials} />
+      <Chat
+        ticketId={ticketId}
+        isAuthenticated={isAuthenticated}
+        credentials={credentials}
+        onAuthExpired={handleAuthExpired}
+      />
     </div>
   );
 }

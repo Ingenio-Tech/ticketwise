@@ -1,9 +1,18 @@
-import { cookies } from "next/headers";
 import { env } from "./env";
+import { AuthError, cwSessionHeaders, forgetSession, type MemberSession } from "./session";
 
 /**
- * ConnectWise API client that uses API key authentication
- * with member impersonation based on the logged-in user's cookies.
+ * ConnectWise REST client. Every call runs as the signed-in member: it takes
+ * the MemberSession that requireMember() returned and sends the same
+ * credentials ConnectWise accepted when it verified the member. ConnectWise
+ * then applies that member's security role. There is no integration key and
+ * no call without a session.
+ *
+ * Errors:
+ *   401 -> AuthError (session expired or invalid; the pod must re-authenticate)
+ *   403 -> CwForbiddenError (the member's role does not allow it)
+ *   other, or a body that is not JSON -> CwApiError (status only)
+ * CW response bodies are never logged or passed on.
  */
 
 type CWRequestOptions = {
@@ -12,12 +21,36 @@ type CWRequestOptions = {
   pageSize?: number;
   page?: number;
   fields?: string[];
+  columns?: string[];
 };
+
+const CW_TIMEOUT_MS = 15000;
+
+export const CW_FORBIDDEN_MESSAGE = "Your ConnectWise security role does not allow this.";
+
+/** ConnectWise refused the call because the member's security role lacks the rights. */
+export class CwForbiddenError extends Error {
+  constructor() {
+    super(CW_FORBIDDEN_MESSAGE);
+    this.name = "CwForbiddenError";
+  }
+}
+
+/** Any other failed ConnectWise call. Carries the status, never the body. */
+export class CwApiError extends Error {
+  constructor(public readonly status: number) {
+    super(status ? `ConnectWise request failed (${status})` : "ConnectWise could not be reached");
+    this.name = "CwApiError";
+  }
+}
 
 function buildUrl(endpoint: string, options?: CWRequestOptions): string {
   const base = `https://${env.CW_COMPANY_URL}/${env.CW_CODE_BASE}/apis/3.0`;
   const url = new URL(`${base}${endpoint}`);
-  
+
+  if (options?.columns?.length) {
+    url.searchParams.set("columns", options.columns.join(","));
+  }
   if (options?.conditions) {
     url.searchParams.set("conditions", options.conditions);
   }
@@ -33,68 +66,74 @@ function buildUrl(endpoint: string, options?: CWRequestOptions): string {
   if (options?.fields?.length) {
     url.searchParams.set("fields", options.fields.join(","));
   }
-  
+
   return url.toString();
 }
 
-async function getHeaders(): Promise<HeadersInit> {
-  const cookieStore = await cookies();
-  
-  // Get the logged-in member's ID for impersonation
-  const memberId = cookieStore.get("memberId")?.value;
-  
-  // Build Basic auth from API credentials
-  // Format: companyId+publicKey:privateKey
-  const authString = `${env.CW_COMPANY_ID}+${env.CW_PUBLIC_KEY}:${env.CW_PRIVATE_KEY}`;
-  const basicAuth = Buffer.from(authString).toString("base64");
-  
-  const headers: HeadersInit = {
-    "Authorization": `Basic ${basicAuth}`,
-    "clientId": env.CW_CLIENT_ID,
-    "Content-Type": "application/json",
-    "Accept": "application/json",
-  };
-  
-  // Add member impersonation header if we have a logged-in member
-  if (memberId) {
-    headers["x-cw-usertype"] = "member";
-    headers["x-cw-memberhash"] = memberId;
+/** The one place that sends a request to ConnectWise. */
+async function cwRequest<T>(
+  session: MemberSession,
+  method: "GET" | "POST",
+  endpoint: string,
+  options?: CWRequestOptions,
+  body?: unknown
+): Promise<T> {
+  // Throws AuthError unless this is a session verifyMember issued.
+  const headers = cwSessionHeaders(session);
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+
+  // Log method, path and status only: no query string (it can hold ticket
+  // text), no hash, no context, no response body.
+  const label = `[cw] ${method} ${endpoint} as ${session.memberId}`;
+
+  let response: Response;
+  try {
+    response = await fetch(buildUrl(endpoint, options), {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+      cache: "no-store",
+      signal: AbortSignal.timeout(CW_TIMEOUT_MS),
+    });
+  } catch {
+    console.warn(`${label} -> network error`);
+    throw new CwApiError(0);
   }
-  
-  return headers;
+
+  if (response.ok) {
+    try {
+      const data = (await response.json()) as T;
+      console.info(`${label} -> ${response.status}`);
+      return data;
+    } catch {
+      // A JSON parse error quotes part of the body, so drop it.
+      console.warn(`${label} -> ${response.status} (invalid JSON)`);
+      throw new CwApiError(response.status);
+    }
+  }
+
+  console.warn(`${label} -> ${response.status}`);
+  // Drain the body without reading it into logs or errors.
+  await response.body?.cancel().catch(() => undefined);
+
+  if (response.status === 401) {
+    // The member session has expired or is no longer valid. Drop it from the
+    // cache so the next requireMember asks ConnectWise again.
+    forgetSession(session);
+    throw new AuthError("Your ConnectWise session has expired. Reload the ticket and try again.");
+  }
+  if (response.status === 403) {
+    throw new CwForbiddenError();
+  }
+  throw new CwApiError(response.status);
 }
 
-export async function cwGet<T>(endpoint: string, options?: CWRequestOptions): Promise<T> {
-  const url = buildUrl(endpoint, options);
-  const headers = await getHeaders();
-  
-  const response = await fetch(url, { headers, cache: "no-store" });
-  
-  if (!response.ok) {
-    const error = await response.text();
-    throw new Error(`ConnectWise API error (${response.status}): ${error}`);
-  }
-  
-  return response.json();
+export async function cwGet<T>(session: MemberSession, endpoint: string, options?: CWRequestOptions): Promise<T> {
+  return cwRequest<T>(session, "GET", endpoint, options);
 }
 
-export async function cwPost<T>(endpoint: string, body: unknown): Promise<T> {
-  const url = buildUrl(endpoint);
-  const headers = await getHeaders();
-  
-  const response = await fetch(url, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
-    cache: "no-store",
-  });
-  
-  if (!response.ok) {
-    const error = await response.text();
-    throw new Error(`ConnectWise API error (${response.status}): ${error}`);
-  }
-  
-  return response.json();
+export async function cwPost<T>(session: MemberSession, endpoint: string, body: unknown): Promise<T> {
+  return cwRequest<T>(session, "POST", endpoint, undefined, body);
 }
 
 // ============ Ticket Types ============
@@ -174,24 +213,24 @@ export interface CWConfiguration {
 
 // ============ API Functions ============
 
-// IDs go into URL paths and report conditions, so they must be plain
-// positive integers (a string like "1/../../system" must never get through).
+// IDs go into URL paths and conditions, so they must be plain positive
+// integers (a string like "1/../../system" must never get through).
 function assertId(id: unknown): asserts id is number {
   if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) {
     throw new Error("Invalid ConnectWise record id");
   }
 }
 
-export async function getTicket(ticketId: number): Promise<CWTicket> {
+export async function getTicket(session: MemberSession, ticketId: number): Promise<CWTicket> {
   assertId(ticketId);
-  return cwGet<CWTicket>(`/service/tickets/${ticketId}`);
+  return cwGet<CWTicket>(session, `/service/tickets/${ticketId}`);
 }
 
-export async function getTicketNotes(ticketId: number): Promise<CWTicketNote[]> {
+export async function getTicketNotes(session: MemberSession, ticketId: number): Promise<CWTicketNote[]> {
   assertId(ticketId);
   // Use allNotes endpoint to get all note types (description, internal, resolution, etc.)
   // Note: allNotes doesn't support orderBy, so we sort client-side
-  const notes = await cwGet<CWTicketNote[]>(`/service/tickets/${ticketId}/allNotes`, {
+  const notes = await cwGet<CWTicketNote[]>(session, `/service/tickets/${ticketId}/allNotes`, {
     pageSize: 100,
   });
   
@@ -203,18 +242,22 @@ export async function getTicketNotes(ticketId: number): Promise<CWTicketNote[]> 
   });
 }
 
-export async function getTicketConfigurations(ticketId: number): Promise<CWConfiguration[]> {
+export async function getTicketConfigurations(session: MemberSession, ticketId: number): Promise<CWConfiguration[]> {
   assertId(ticketId);
-  return cwGet<CWConfiguration[]>(`/service/tickets/${ticketId}/configurations`);
+  return cwGet<CWConfiguration[]>(session, `/service/tickets/${ticketId}/configurations`);
 }
 
-export async function searchTickets(conditions: string, options?: Omit<CWRequestOptions, "conditions">): Promise<CWTicket[]> {
-  return cwGet<CWTicket[]>("/service/tickets", { conditions, ...options });
+export async function searchTickets(
+  session: MemberSession,
+  conditions: string,
+  options?: Omit<CWRequestOptions, "conditions">
+): Promise<CWTicket[]> {
+  return cwGet<CWTicket[]>(session, "/service/tickets", { conditions, ...options });
 }
 
-export async function getConfiguration(configId: number): Promise<CWConfiguration> {
+export async function getConfiguration(session: MemberSession, configId: number): Promise<CWConfiguration> {
   assertId(configId);
-  return cwGet<CWConfiguration>(`/company/configurations/${configId}`);
+  return cwGet<CWConfiguration>(session, `/company/configurations/${configId}`);
 }
 
 // Report API response structure
@@ -223,38 +266,59 @@ interface ServiceReportResponse {
   row_values: Array<Array<string | number | boolean | null>>;
 }
 
-export async function getConfigurationTickets(configId: number, limit: number = 30): Promise<CWTicket[]> {
+/**
+ * True when a Report API config_recids value lists exactly this config id.
+ * config_recids is a comma-separated list of integer ids with no spaces
+ * ("12", "5,12", "5,12,7"), so 12 must not match "112", "120" or "1,2".
+ */
+export function configRecidsInclude(recids: unknown, configId: number): boolean {
+  if (typeof recids !== "string" && typeof recids !== "number") return false;
+  const wanted = String(configId);
+  return String(recids)
+    .split(",")
+    .some((part) => part.trim() === wanted);
+}
+
+export async function getConfigurationTickets(
+  session: MemberSession,
+  configId: number,
+  limit: number = 30
+): Promise<CWTicket[]> {
   assertId(configId);
   // Use the Service Report API to query tickets by config_recids
-  // This is MUCH more efficient than checking each ticket individually
-  
-  const reportUrl = buildUrl("/system/reports/Service");
-  const url = new URL(reportUrl);
-  
-  // Select columns we need - config_recids contains comma-separated config IDs
-  url.searchParams.set("columns", "TicketNbr,Summary,date_entered,Closed_Flag,status_description,config_recids");
-  // Query for tickets containing this config ID
-  url.searchParams.set("conditions", `config_recids like '%${configId}%'`);
-  url.searchParams.set("orderBy", "TicketNbr desc");
-  url.searchParams.set("pageSize", String(limit));
-  
-  const headers = await getHeaders();
-  const response = await fetch(url.toString(), { headers, cache: "no-store" });
-  
-  if (!response.ok) {
-    const error = await response.text();
-    throw new Error(`ConnectWise Report API error (${response.status}): ${error}`);
-  }
-  
-  const report: ServiceReportResponse = await response.json();
-  
+  // This is MUCH more efficient than checking each ticket individually.
+  // Needs Report API rights in the member's security role; a 403 throws
+  // CwForbiddenError. The rows are then re-checked against /service/tickets
+  // (keepVisibleTickets), so the member only sees tickets they can open.
+
+  // config_recids is a comma-separated list, so match the id as a whole
+  // list item: alone, first, last or in the middle. A bare like '%12%'
+  // also matches 112, 120 and 312 (other devices, other clients).
+  const id = String(configId);
+  const conditions =
+    `(config_recids = '${id}' or config_recids like '${id},%' or ` +
+    `config_recids like '%,${id}' or config_recids like '%,${id},%')`;
+
+  const report = await cwGet<ServiceReportResponse>(session, "/system/reports/Service", {
+    // config_recids contains comma-separated config IDs
+    columns: ["TicketNbr", "Summary", "date_entered", "Closed_Flag", "status_description", "config_recids"],
+    conditions,
+    orderBy: "TicketNbr desc",
+    pageSize: limit,
+  });
+
   // Map column names to indices
   const colNames = report.column_definitions.map(def => Object.keys(def)[0]);
   const getColIndex = (name: string) => colNames.indexOf(name);
-  
+  const recidsCol = getColIndex("config_recids");
+
+  // Keep only rows whose config_recids really lists this id, so a wrong
+  // server-side match can never leak another device's ticket in.
+  const rows = recidsCol < 0 ? [] : report.row_values.filter(row => configRecidsInclude(row[recidsCol], configId));
+
   // Convert report rows to ticket objects
   // Report returns: TicketNbr, Summary, date_entered, Closed_Flag, status_description, config_recids
-  const tickets: CWTicket[] = report.row_values.map(row => {
+  const reported: CWTicket[] = rows.map(row => {
     const ticketId = row[getColIndex("TicketNbr")] as number;
     const summary = row[getColIndex("Summary")] as string;
     const dateEntered = row[getColIndex("date_entered")] as string;
@@ -268,6 +332,11 @@ export async function getConfigurationTickets(configId: number, limit: number = 
       status: statusName ? { id: 0, name: closedFlag ? `${statusName} (Closed)` : statusName } : undefined,
     };
   });
+
+  // The Report API may not apply the same ticket limits (boards, "My"
+  // tickets) as /service/tickets. Ask /service/tickets, as the same member,
+  // which of these tickets they can open, and keep only those.
+  const tickets = await keepVisibleTickets(session, reported);
   
   // Sort to put closed/resolved tickets first (they have solutions!)
   const closedStatuses = ["closed", "resolved", "completed"];
@@ -280,6 +349,24 @@ export async function getConfigurationTickets(configId: number, limit: number = 
   });
 }
 
+/**
+ * Keep only the tickets this member can open through /service/tickets.
+ * Ids that are not plain positive integers are dropped before they reach the
+ * conditions string.
+ */
+async function keepVisibleTickets(session: MemberSession, tickets: CWTicket[]): Promise<CWTicket[]> {
+  const candidates = tickets.filter(t => Number.isSafeInteger(t.id) && t.id > 0);
+  if (candidates.length === 0) return [];
+
+  const ids = [...new Set(candidates.map(t => t.id))];
+  const visible = await searchTickets(session, `id in (${ids.join(",")})`, {
+    fields: ["id"],
+    pageSize: ids.length,
+  });
+  const allowed = new Set(visible.map(t => t.id));
+  return candidates.filter(t => allowed.has(t.id));
+}
+
 // Common words to exclude from keyword matching
 const STOP_WORDS = new Set([
   "user", "issue", "problem", "help", "need", "please", "urgent", "asap",
@@ -288,24 +375,39 @@ const STOP_WORDS = new Set([
   "customer", "company", "staff", "employee", "team", "office", "site",
 ]);
 
+/**
+ * Keywords from ticket text that are safe inside a CW conditions string
+ * literal: lower-case letters and digits only, so quotes, brackets and
+ * operators in the summary can never break out of the "..." literal.
+ */
+export function summaryKeywords(summary: string): string[] {
+  return summary
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, "")
+    .split(/\s+/)
+    .filter(w => w.length > 3 && /^[a-z0-9]+$/.test(w) && !STOP_WORDS.has(w))
+    .slice(0, 4);
+}
+
 export async function searchSimilarTickets(
+  session: MemberSession,
   summary: string,
   companyId?: number,
   excludeTicketId?: number,
   daysBack: number = 90
 ): Promise<CWTicket[]> {
+  // These go into the conditions string unquoted, so they must be integers.
+  if (companyId) assertId(companyId);
+  if (excludeTicketId) assertId(excludeTicketId);
+  if (!Number.isSafeInteger(daysBack) || daysBack <= 0) throw new Error("Invalid search window");
+
   // Build conditions - search in summary and look for similar issues
   const dateThreshold = new Date();
   dateThreshold.setDate(dateThreshold.getDate() - daysBack);
   const dateStr = dateThreshold.toISOString().split("T")[0];
   
   // Extract meaningful keywords (filter stop words)
-  const keywords = summary
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, "")
-    .split(/\s+/)
-    .filter(w => w.length > 3 && !STOP_WORDS.has(w))
-    .slice(0, 4);
+  const keywords = summaryKeywords(summary);
   
   // If no meaningful keywords, don't search
   if (keywords.length === 0) {
@@ -327,7 +429,7 @@ export async function searchSimilarTickets(
   conditions += ` and (${keywordCondition})`;
   
   // Fetch tickets - we'll sort to prioritise closed ones
-  const tickets = await searchTickets(conditions, {
+  const tickets = await searchTickets(session, conditions, {
     orderBy: "dateEntered desc",
     pageSize: 20,
     fields: ["id", "summary", "status", "company", "dateEntered", "type", "initialDescription", "initialResolution"],

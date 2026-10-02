@@ -17,7 +17,7 @@ TicketWise embeds as a pod (iframe) directly in the ConnectWise service ticket s
 
 1. **Authenticates automatically** via ConnectWise's [Hosted API](https://developer.connectwise.com/Products/Manage/Hosted_APIs) (`postMessage`) — no separate login
 2. **Pulls full ticket context** — summary, notes, configurations, custom fields — using the CW REST API
-3. **Respects user permissions** — API calls use member impersonation, so techs only see what they're allowed to
+3. **Runs as the signed-in technician**: every ConnectWise call uses the technician's own Hosted API session, so ConnectWise applies their security role and they only see what that role allows
 4. **Opens a chat interface** where the tech can ask anything about the ticket in plain English
 5. **Sends context to an LLM** and streams the response back with Markdown formatting
 
@@ -53,7 +53,7 @@ ConnectWise PSA  →  Your TicketWise Server  →  LLM Provider  →  Back to Br
 - **Ticket Summaries** — instant, structured summaries (different formats for open vs closed tickets)
 - **Smart Suggestions** — AI-powered troubleshooting recommendations based on ticket context
 - **Similar Ticket Search** — finds related issues from company history (90 days) and globally (14 days), fetches notes from closed tickets to surface actual resolutions
-- **Configuration History** — shows past issues with attached devices using the CW Report API
+- **Configuration History**: shows past issues with attached devices using the CW Report API (the technician's ConnectWise role needs Report API rights)
 - **Customer Response Drafts** — drafts professional replies with appropriate tone
 - **Escalation Notes** — prepares structured handoff notes
 - **5 Whys Analysis** — root cause analysis directly from ticket data
@@ -81,7 +81,7 @@ ConnectWise PSA  →  Your TicketWise Server  →  LLM Provider  →  Back to Br
 
 - **ConnectWise PSA** instance (cloud-hosted — EU, NA, or AU regions)
 - **ConnectWise Developer Client ID** — [register here](https://developer.connectwise.com/ClientId)
-- **ConnectWise API keys** — a public/private key pair for an API member (see [CW docs](https://developer.connectwise.com/Products/Manage/REST#Authentication))
+- No ConnectWise API keys or API member: TicketWise calls ConnectWise as the signed-in technician
 - **OpenRouter API key** — [sign up here](https://openrouter.ai)
 - **Node.js 20+**
 
@@ -95,8 +95,6 @@ CW_CLIENT_ID=your-connectwise-developer-client-id
 CW_COMPANY_ID=your-company-id
 CW_COMPANY_URL=eu.myconnectwise.net        # or na.myconnectwise.net / au.myconnectwise.net
 CW_CODE_BASE=v4_6_release
-CW_PUBLIC_KEY=your-api-public-key
-CW_PRIVATE_KEY=your-api-private-key
 
 # OpenRouter (https://openrouter.ai)
 OPENROUTER_API_KEY=sk-or-v1-your-openrouter-api-key
@@ -109,15 +107,21 @@ HOSTNAME=0.0.0.0
 
 > **Using a different LLM provider?** The app uses the OpenAI SDK pointed at OpenRouter's base URL. To use Azure OpenAI, a local model server, or another compatible provider, change the `baseURL` and `apiKey` in `src/lib/ai.ts`. For Azure OpenAI, your base URL will look like `https://your-resource.openai.azure.com/openai/deployments/your-deployment` — see the [Azure OpenAI docs](https://learn.microsoft.com/en-us/azure/ai-services/openai/reference).
 
-### ConnectWise API Member
+### ConnectWise Security Roles
 
-Create a dedicated API member in ConnectWise with **minimum required permissions**:
+TicketWise has no API member and no API keys. Each call runs with the signed-in technician's own Hosted API session, so ConnectWise applies that technician's security role. A technician sees in TicketWise only what they can see in ConnectWise.
 
-- **Service Tickets:** Read (Inquire)
-- **Configurations:** Read (Inquire)
-- **System > Reports:** Read (for configuration ticket history via Report API)
+For every feature to work, a technician's role needs read (Inquire) access to:
 
-No write access is needed — TicketWise is read-only.
+- **Service tickets**, including notes
+- **Configurations** attached to tickets
+- **The Report API** (`/system/reports/Service`), for `/config` only
+
+Only the ticket itself is required. If the role cannot read the ticket, TicketWise tells the technician their ConnectWise security role does not allow it. If it cannot read the notes or configurations, TicketWise answers without them and tells the AI they are hidden. Without Report API rights, `/config` says it cannot fetch configuration history; the other commands still work. `/config` checks each ticket the Report API returns against the service tickets API, as the same technician, and shows only the ones they can open.
+
+TicketWise is read-only. It needs no write access.
+
+**Upgrading from an older version?** Older versions called ConnectWise with an API member's key pair. Remove `CW_PUBLIC_KEY` and `CW_PRIVATE_KEY` from your deployment and revoke that key pair in ConnectWise. The app logs a warning while they are still set.
 
 ### Installation
 
@@ -160,7 +164,7 @@ TicketWise handles ConnectWise ticket data, which may include client names, cont
   - Security → WAF → Managed rules enabled
 Any host that runs Docker or Node.js 20 works: a VPS, Azure App Service, AWS, Coolify, Unraid — your choice. The app is lightweight and stateless.
 
-> **⚠️ Cloudflare Access / Zero Trust:** You **cannot** put Cloudflare Access in front of TicketWise. The pod loads inside a ConnectWise iframe, and CF Access would challenge the iframe load with a login redirect — which breaks inside iframes. The pod's security comes from ConnectWise's own authentication (postMessage handshake + member impersonation) and the origin validation built into the app. Tightening `frame-ancestors` in CSP (see Security section) is the correct way to restrict who can embed it.
+> **⚠️ Cloudflare Access / Zero Trust:** You **cannot** put Cloudflare Access in front of TicketWise. The pod loads inside a ConnectWise iframe, and CF Access would challenge the iframe load with a login redirect, which breaks inside iframes. The pod's security comes from ConnectWise's own authentication (the postMessage handshake, checked with ConnectWise on the server, and every call made as the signed-in member) and the origin validation built into the app. Tightening `frame-ancestors` in CSP (see Security section) is the correct way to restrict who can embed it.
 
 ### Docker
 
@@ -209,10 +213,12 @@ This can also be done via `az` CLI — see the [Azure App Service docs](https://
 TicketWise is designed to be safe by default, but **you are responsible for securing your own deployment**.
 
 **What the app does right:**
-- All API keys stay server-side (validated by Zod, never in client bundles)
-- Every Server Action checks the member with ConnectWise first (`src/lib/session.ts`): the Hosted API memberId/memberHash pair must pass a CW API call before any ticket data is read or the LLM is called. Good checks are cached for 5 minutes
+- The LLM key stays server-side (validated by Zod, never in client bundles). There is no ConnectWise API key at all
+- Every Server Action checks the member with ConnectWise first (`src/lib/session.ts`): the Hosted API memberId/memberHash pair must pass a CW API call, and CW must name the same member, before any ticket data is read or the LLM is called. Good checks are cached for 5 minutes
 - Server Action input is validated with Zod (integer ticket IDs, `user`/`assistant` roles only, length caps)
-- ConnectWise API calls use member impersonation (respects the logged-in user's permissions)
+- Every ConnectWise call runs with the signed-in member's own verified session, so ConnectWise applies their security role. No call can run without a verified session
+- If ConnectWise says the session has expired (401), TicketWise drops it and the pod asks ConnectWise for a fresh sign-in, which the server checks again. If the member's role does not allow a call (403), the technician gets a plain message, never ConnectWise's error text
+- ConnectWise calls are logged as method, path, member and status only (no ticket content, no credentials)
 - PostMessage origin validation (only accepts messages from ConnectWise domains)
 - HTTP-only, secure cookies with 8-hour expiry
 - Rate limiting (30 req/min per verified member, 120 req/min overall)
@@ -222,11 +228,12 @@ TicketWise is designed to be safe by default, but **you are responsible for secu
 
 **What you need to do:**
 - **Restrict `frame-ancestors`** — change `frame-ancestors *` to `frame-ancestors https://*.myconnectwise.net https://your-domain.com` in `next.config.ts` and `middleware.ts`. This is the primary way to control who can embed the pod.
-- **Use a restricted CW API member** — read-only access to service tickets, configurations, and reports only
+- **Review your technicians' ConnectWise security roles**: TicketWise shows each technician only what their role allows, so the roles are the access control
+- **Remove any old `CW_PUBLIC_KEY` / `CW_PRIVATE_KEY`** from your deployment and revoke that key pair in ConnectWise
 - **Enforce TLS 1.2+** at your edge/reverse proxy
 - **Review the [Security Report](SECURITY-REPORT.md)** for the full assessment
 
-> **Note:** Traditional auth layers like Cloudflare Access or Azure AD App Proxy **cannot** be used here — they break iframe-based pods. The security model relies on CW's own authentication (postMessage handshake), member impersonation, origin validation, and CSP `frame-ancestors`.
+> **Note:** Traditional auth layers like Cloudflare Access or Azure AD App Proxy **cannot** be used here, because they break iframe-based pods. The security model relies on ConnectWise's own authentication (the postMessage handshake, checked server-side), calls made as the signed-in member, origin validation, and CSP `frame-ancestors`.
 
 > **Disclaimer:** This software is provided as-is under the MIT licence. It is not production-hardened out of the box. You are responsible for securing your deployment, managing API credentials, and ensuring compliance with your data protection obligations. The authors accept no liability for security incidents arising from your use of this software.
 
@@ -248,7 +255,8 @@ src/
 │   └── use-hosted-api.ts       # CW Hosted API (postMessage) integration
 ├── lib/
 │   ├── ai.ts                   # OpenRouter client, system prompt, slash command prompts
-│   ├── connectwise.ts          # CW REST API client — tickets, notes, configs, Report API
+│   ├── connectwise.ts          # CW REST API client (runs as the signed-in member): tickets, notes, configs, Report API
+│   ├── session.ts              # Verifies the member with ConnectWise; builds the member session headers
 │   ├── env.ts                  # Zod environment variable validation
 │   └── format.ts               # Formats ticket/note/config data as text for AI context
 ├── actions/
@@ -260,9 +268,9 @@ src/
 
 ### Key Design Decisions
 
-- **Server Actions over API routes** — chat processing happens server-side via Next.js Server Actions, keeping API keys secure and simplifying the architecture
-- **ConnectWise Report API** for config history — the standard API doesn't support querying tickets by configuration ID efficiently, so we use the Report API (`/system/reports/Service`) with `config_recids` filtering
-- **Member impersonation** — all CW API calls include the `x-cw-memberhash` header from the logged-in user's session, so board/ticket permissions are respected without TicketWise needing to implement its own access control
+- **Server Actions over API routes**: chat processing happens server-side via Next.js Server Actions, keeping the LLM key secure and simplifying the architecture
+- **ConnectWise Report API** for config history: the standard API cannot query tickets by configuration ID efficiently, so we use the Report API (`/system/reports/Service`). `config_recids` is a comma-separated list of ids. The query matches the id as a whole list item and the code checks every row again, so another device's tickets cannot slip in. The ticket ids are then checked against `/service/tickets` as the same member, so the Report API cannot show a ticket the member could not open
+- **Calls run as the signed-in member**: every ConnectWise call sends the member's own Hosted API session, in the cookie or Basic form ConnectWise accepted when `src/lib/session.ts` verified it. ConnectWise then applies the member's security role, so TicketWise needs no access control and no API keys of its own
 - **No database** — entirely stateless. Chat history lives in React state (client-side). No persistence needed
 - **`frame-ancestors *`** in CSP — required for the pod to load in ConnectWise's iframe. Tighten this in production
 - **Clipboard via `document.execCommand`** — `navigator.clipboard` is blocked in cross-origin iframes, so we use range selection + execCommand to copy rich text (HTML formatting preserved for Outlook/Teams)

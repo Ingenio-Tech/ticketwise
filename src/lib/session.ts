@@ -3,7 +3,8 @@ import { createHash } from "crypto";
 import { env } from "./env";
 
 /**
- * Server-side check that the caller is a real, signed-in ConnectWise member.
+ * Server-side check that the caller is a real, signed-in ConnectWise member,
+ * and the member session every ConnectWise data call then runs with.
  *
  * The CW Hosted API hands the pod a memberId and memberHash via postMessage.
  * Anyone can send those values to a Server Action, so the server must prove
@@ -19,6 +20,11 @@ import { env } from "./env";
  *
  * The company always comes from server env (CW_COMPANY_ID), never from the
  * client, so a member of another CW tenant on the same host cannot get in.
+ *
+ * A successful check returns a MemberSession: the credentials and header form
+ * ConnectWise accepted. lib/connectwise.ts sends every data call with exactly
+ * that session (see cwSessionHeaders), so ConnectWise applies the member's own
+ * security role. There is no integration key and no other way to call CW.
  */
 
 export class AuthError extends Error {
@@ -34,11 +40,26 @@ export interface MemberCredentials {
   memberContext?: string;
 }
 
-export interface VerifiedMember {
-  memberId: string;
+export type AuthMethod = "cookie" | "basic" | "cookie-encoded" | "cookie-no-context";
+
+/**
+ * A member session ConnectWise has accepted. Only verifyMember creates one,
+ * and cwSessionHeaders refuses any object it did not create, so a hand-built
+ * or client-supplied object can never reach ConnectWise.
+ */
+export interface MemberSession {
+  /** The member identifier as ConnectWise spells it. */
+  readonly memberId: string;
+  readonly memberHash: string;
+  readonly memberContext?: string;
+  /** The header form ConnectWise accepted for these credentials. */
+  readonly method: AuthMethod;
 }
 
-type Method = "cookie" | "basic" | "cookie-encoded" | "cookie-no-context";
+/** What requireMember and verifyMember return: the verified session. */
+export type VerifiedMember = MemberSession;
+
+type Method = AuthMethod;
 
 // Values must be safe to place in a Cookie or Basic auth header:
 // printable ASCII, no whitespace, and none of : ; , " \
@@ -59,7 +80,10 @@ const GLOBAL_FAIL_WINDOW_MS = 60 * 1000;
 const MAX_FAILS_GLOBAL = 30;
 const CW_TIMEOUT_MS = 8000;
 
-const verified = new Map<string, { memberId: string; expires: number }>();
+const verified = new Map<string, { session: MemberSession; expires: number }>();
+// Sessions created by verifyMember, with the exact credentials and header form
+// ConnectWise accepted. cwSessionHeaders refuses any object not in here.
+const issued = new WeakMap<MemberSession, { method: Method; creds: Readonly<MemberCredentials> }>();
 const rejected = new Map<string, number>();
 const memberFailures = new Map<string, { count: number; reset: number }>();
 let globalFailures = { count: 0, reset: 0 };
@@ -119,6 +143,8 @@ function tooManyFailures(memberId: string): boolean {
 }
 
 function buildHeaders(method: Method, c: MemberCredentials): Record<string, string> {
+  // The single place that turns member credentials into CW request headers,
+  // for the verification call and for every data call (cwSessionHeaders).
   const headers: Record<string, string> = {
     clientId: env.CW_CLIENT_ID,
     Accept: "application/json",
@@ -155,6 +181,53 @@ function buildHeaders(method: Method, c: MemberCredentials): Record<string, stri
   return headers;
 }
 
+function issue(c: MemberCredentials, identifier: string, method: Method): MemberSession {
+  const session: MemberSession = Object.freeze({
+    memberId: identifier,
+    memberHash: c.memberHash,
+    memberContext: c.memberContext,
+    method,
+  });
+  // Data calls send these exact bytes, the ones /system/myMembers/info
+  // accepted, even where CW spells the member differently (e.g. "ssmyth"
+  // claimed, "SSmyth" returned). session.memberId is CW's spelling, for logs.
+  const creds = Object.freeze({ memberId: c.memberId, memberHash: c.memberHash, memberContext: c.memberContext });
+  issued.set(session, { method, creds });
+  return session;
+}
+
+/**
+ * Headers for a ConnectWise data call: the same credentials and header form
+ * ConnectWise accepted when it verified the member. Throws AuthError for
+ * anything that is not a session verifyMember issued.
+ */
+export function cwSessionHeaders(session: MemberSession): Record<string, string> {
+  const proof = session && typeof session === "object" ? issued.get(session) : undefined;
+  if (!proof) {
+    throw new AuthError();
+  }
+  return buildHeaders(proof.method, proof.creds);
+}
+
+/**
+ * A value made safe for one log line: control characters (newlines included)
+ * become spaces and the length is capped, so client- or CW-supplied text
+ * cannot fake extra log lines.
+ */
+export function logSafe(value: unknown, max = 100): string {
+  return String(value ?? "").replace(/[\x00-\x1F\x7F]+/g, " ").slice(0, max);
+}
+
+/**
+ * Drop a session from the positive cache, so the next requireMember asks
+ * ConnectWise again. Called when a data call gets a 401 (expired session).
+ */
+export function forgetSession(session: MemberSession): void {
+  for (const [key, entry] of verified) {
+    if (entry.session === session) verified.delete(key);
+  }
+}
+
 interface CwCheck {
   /** HTTP status from CW, 0 on a network error or timeout, 403 on an identity mismatch. */
   status: number;
@@ -174,20 +247,29 @@ async function callCw(method: Method, c: MemberCredentials): Promise<CwCheck> {
     });
     let code = "";
     if (res.status !== 200) {
-      // CW error bodies carry a code and message, never credentials.
+      // Log CW's error code and a short, cleaned message (they explain why
+      // CW refused the member). The hash and context are blanked in case CW
+      // ever echoes them; a non-JSON body is not logged at all.
       const body = await res.text().catch(() => "");
       try {
         const j = JSON.parse(body);
-        code = `${j.code ?? ""}:${String(j.message ?? "").slice(0, 120)}`;
+        const redact = (v: unknown) => {
+          let text = String(v ?? "");
+          for (const secret of [c.memberHash, c.memberContext]) {
+            if (secret) text = text.split(secret).join("[redacted]");
+          }
+          return text;
+        };
+        code = `${logSafe(redact(j?.code), 40)}:${logSafe(redact(j?.message), 120)}`;
       } catch {
-        code = body.slice(0, 80).replace(/\s+/g, " ");
+        code = "non-JSON body";
       }
       return { status: res.status, code };
     }
     const info = (await res.json().catch(() => null)) as { identifier?: unknown } | null;
     const identifier = typeof info?.identifier === "string" ? info.identifier : "";
     if (!identifier || identifier.toLowerCase() !== c.memberId.toLowerCase()) {
-      return { status: 403, code: `identity mismatch: CW says ${identifier || "(none)"}` };
+      return { status: 403, code: `identity mismatch: CW says ${logSafe(identifier, 100) || "(none)"}` };
     }
     return { status: 200, code: "", identifier };
   } catch {
@@ -231,8 +313,10 @@ async function diagnose(c: MemberCredentials): Promise<{ method: Method; identif
 }
 
 /**
- * Prove a memberId/memberHash pair with ConnectWise. Positive results are
- * cached for 5 minutes, keyed by a SHA-256 of company, member and hash.
+ * Prove a memberId/memberHash pair with ConnectWise and return the session it
+ * accepted. Positive results are cached for 5 minutes, keyed by a SHA-256 of
+ * company, member and hash, so a cached session only goes back to a caller
+ * who holds that member's hash.
  */
 export async function verifyMember(c: MemberCredentials): Promise<VerifiedMember> {
   if (!credentialsAreWellFormed(c)) {
@@ -244,7 +328,7 @@ export async function verifyMember(c: MemberCredentials): Promise<VerifiedMember
 
   const hit = verified.get(key);
   if (hit && hit.expires > now) {
-    return { memberId: hit.memberId };
+    return hit.session;
   }
   if (hit) verified.delete(key);
 
@@ -269,14 +353,15 @@ export async function verifyMember(c: MemberCredentials): Promise<VerifiedMember
     if (code) codes.push(code);
     if (status === 200 && identifier) {
       preferredMethod = method;
-      verified.set(key, { memberId: identifier, expires: now + POSITIVE_TTL_MS });
+      const session = issue(c, identifier, method);
+      verified.set(key, { session, expires: now + POSITIVE_TTL_MS });
       trim(verified);
       console.info(`[auth] member ${identifier} verified with ConnectWise (${method}, identity matched)`);
       if (!described.has(identifier.toLowerCase())) {
         described.add(identifier.toLowerCase());
         console.info(`[auth] shape for ${identifier}: ${describe(c)}`);
       }
-      return { memberId: identifier };
+      return session;
     }
   }
 
@@ -287,10 +372,11 @@ export async function verifyMember(c: MemberCredentials): Promise<VerifiedMember
     if (alt) {
       // CW accepted the same credentials in another documented cookie form
       // and named the claimed member, so the member is genuine.
-      verified.set(key, { memberId: alt.identifier, expires: now + POSITIVE_TTL_MS });
+      const session = issue(c, alt.identifier, alt.method);
+      verified.set(key, { session, expires: now + POSITIVE_TTL_MS });
       trim(verified);
       console.info(`[auth] member ${alt.identifier} verified with ConnectWise (${alt.method}, identity matched)`);
-      return { memberId: alt.identifier };
+      return session;
     }
     recordFailure(c.memberId);
     rejected.set(key, now + NEGATIVE_TTL_MS);
@@ -324,7 +410,8 @@ function parseExplicit(value: unknown): MemberCredentials | null {
 
 /**
  * Gate for every Server Action that reaches ConnectWise or the LLM.
- * Throws AuthError unless ConnectWise confirms the member.
+ * Throws AuthError unless ConnectWise confirms the member, and returns the
+ * member session that every ConnectWise data call must then be given.
  *
  * The pod passes the Hosted API credentials it holds in memory with each
  * call, because browsers may block cookies in a cross-site iframe. When it

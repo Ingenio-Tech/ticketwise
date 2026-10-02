@@ -48,7 +48,7 @@ IT service desk technicians spend significant time reading through ticket notes,
 
 ### Permissions
 
-All ConnectWise API calls use the logged-in technician's permissions via member impersonation (`x-cw-memberhash` header). If a technician can't see a ticket in CW, they can't see it through TicketWise either.
+All ConnectWise API calls run as the logged-in technician, using their own verified Hosted API session, so ConnectWise applies their security role. If a technician can't see a ticket in CW, they can't see it through TicketWise either.
 
 ## Tech Stack
 
@@ -69,7 +69,7 @@ All ConnectWise API calls use the logged-in technician's permissions via member 
 - HTTP-only, Secure, SameSite=None cookies (required for cross-site iframe)
 - CSP `frame-ancestors *` to allow CW iframe embedding (tighten in production)
 - No standalone access — shows "Pod Mode Only" outside CW
-- All CW API calls respect user permissions via member impersonation
+- All CW API calls run as the signed-in member, with their own verified Hosted API session, so ConnectWise applies that member's security role
 
 ### Rate Limiting
 - 30 requests per minute per authenticated member

@@ -6,11 +6,11 @@ import {
   getTicketContext,
   findSimilarCompanyTickets,
   findSimilarGlobalTickets,
-  getConfigTicketHistory,
+  getConfigHistoryText,
 } from "./ticket";
-import { formatTicketForAI, formatSimilarTickets, formatSimilarTicketsWithNotes } from "@/lib/format";
-import type { CWTicket } from "@/lib/connectwise";
-import { AuthError, requireMember, type MemberCredentials } from "@/lib/session";
+import { formatTicketForAI, formatSimilarTicketsWithNotes } from "@/lib/format";
+import { CwForbiddenError, type CWTicket } from "@/lib/connectwise";
+import { AuthError, requireMember, type MemberCredentials, type MemberSession } from "@/lib/session";
 
 // Simple in-memory rate limiter, keyed on the ConnectWise-verified member.
 // In production, consider using Redis for distributed rate limiting.
@@ -83,8 +83,15 @@ export interface ChatRequest {
 export interface ChatResponse {
   message: string;
   slashCommand?: string;
-  error?: "unauthorised" | "invalid" | "rate_limited";
+  error?: "unauthorised" | "invalid" | "rate_limited" | "forbidden";
 }
+
+const UNAUTHORISED: ChatResponse = {
+  // The pod asks ConnectWise for fresh credentials when it sees this error.
+  message:
+    "Your ConnectWise session could not be verified. TicketWise is signing you in again: send your message again, or reload the ticket if this keeps happening.",
+  error: "unauthorised",
+};
 
 /**
  * Detect slash command in user message.
@@ -107,22 +114,17 @@ function detectSlashCommand(message: string): { command: string | null; content:
  */
 export async function processChat(request: ChatRequest, auth?: MemberCredentials): Promise<ChatResponse> {
   // 1. Prove the caller is a signed-in ConnectWise member before any
-  //    ConnectWise or LLM call.
-  let memberId: string;
+  //    ConnectWise or LLM call. Every CW call below runs with this session.
+  let session: MemberSession;
   try {
-    ({ memberId } = await requireMember(auth));
+    session = await requireMember(auth);
   } catch (err) {
-    if (err instanceof AuthError) {
-      return {
-        message: "Your ConnectWise session could not be verified. Reload the ticket and try again.",
-        error: "unauthorised",
-      };
-    }
+    if (err instanceof AuthError) return UNAUTHORISED;
     throw err;
   }
 
   // 2. Rate limit on the verified member.
-  const { allowed } = checkRateLimit(memberId.toLowerCase());
+  const { allowed } = checkRateLimit(session.memberId.toLowerCase());
 
   if (!allowed) {
     return {
@@ -138,13 +140,28 @@ export async function processChat(request: ChatRequest, auth?: MemberCredentials
     return { message: "Invalid request.", error: "invalid" };
   }
 
-  const { ticketId, messages, userMessage } = parsed.data;
-  
+  // 4. Answer. ConnectWise applies the member's own security role: a 401
+  //    means the session expired, a 403 means the role does not allow it.
+  //    Only a 403 on the ticket itself reaches here; notes, configurations,
+  //    /similar and /config degrade to a note in the AI context instead.
+  try {
+    return await answer(session, parsed.data);
+  } catch (err) {
+    if (err instanceof AuthError) return UNAUTHORISED;
+    if (err instanceof CwForbiddenError) return { message: err.message, error: "forbidden" };
+    throw err;
+  }
+}
+
+async function answer(
+  session: MemberSession,
+  { ticketId, messages, userMessage }: ChatRequest
+): Promise<ChatResponse> {
   // Detect slash command
   const { command, content } = detectSlashCommand(userMessage);
   
   // Get ticket context
-  const ticketContext = await getTicketContext(ticketId);
+  const ticketContext = await getTicketContext(session, ticketId);
   const ticketText = formatTicketForAI(ticketContext);
   
   // Prepare chat options
@@ -158,6 +175,7 @@ export async function processChat(request: ChatRequest, auth?: MemberCredentials
     try {
       // Get similar tickets from same company first (prioritise closed/resolved)
       const companyTickets = await findSimilarCompanyTickets(
+        session,
         ticketId,
         ticketContext.ticket.summary,
         ticketContext.ticket.company?.id || 0
@@ -167,6 +185,7 @@ export async function processChat(request: ChatRequest, auth?: MemberCredentials
       let globalTickets: CWTicket[] = [];
       if (companyTickets.length < 3) {
         globalTickets = await findSimilarGlobalTickets(
+          session,
           ticketId,
           ticketContext.ticket.summary
         );
@@ -193,11 +212,12 @@ export async function processChat(request: ChatRequest, auth?: MemberCredentials
             // Only fetch notes for closed tickets (they have solutions)
             if (isClosed) {
               const { getTicketNotes } = await import("@/lib/connectwise");
-              const notes = await getTicketNotes(ticket.id);
+              const notes = await getTicketNotes(session, ticket.id);
               return { ticket, notes };
             }
             return { ticket, notes: [] };
           } catch (err) {
+            if (err instanceof AuthError) throw err;
             // If we can't fetch notes for this ticket, return without notes
             return { ticket, notes: [] };
           }
@@ -206,44 +226,25 @@ export async function processChat(request: ChatRequest, auth?: MemberCredentials
       
       chatOptions.similarTickets = formatSimilarTicketsWithNotes(ticketsWithNotes);
     } catch (err) {
+      if (err instanceof AuthError) throw err;
       console.error("Failed to fetch similar tickets:", err);
       // Continue without similar tickets - AI will respond based on current ticket only
+      if (err instanceof CwForbiddenError) {
+        chatOptions.similarTickets =
+          "Unable to search for similar tickets: the member's ConnectWise security role does not allow it.";
+      }
     }
   }
   
   if (command === "/config") {
-    // Get config history if configurations are attached
-    if (ticketContext.configurations.length > 0) {
-      try {
-        const configTickets: CWTicket[] = [];
-        const configNames: string[] = [];
-        
-        for (const config of ticketContext.configurations.slice(0, 3)) {
-          configNames.push(config.name || `Config #${config.id}`);
-          try {
-            const history = await getConfigTicketHistory(config.id);
-            configTickets.push(...history.filter(t => t.id !== ticketId));
-          } catch (err) {
-            // Skip this config if we can't fetch its history
-            console.error(`Failed to fetch history for config ${config.id}:`, err);
-          }
-        }
-        
-        if (configTickets.length > 0) {
-          chatOptions.configHistory = formatSimilarTickets(configTickets);
-        } else {
-          // Configs exist but no historical tickets found - tell AI
-          chatOptions.configHistory = `No historical tickets found mentioning these configurations: ${configNames.join(", ")}. This may be a new device or the configuration name doesn't typically appear in ticket summaries.`;
-        }
-      } catch (err) {
-        console.error("Failed to fetch config history:", err);
-        // Continue without config history - AI will work with current ticket only
-        chatOptions.configHistory = "Unable to fetch configuration history due to an error.";
-      }
-    } else {
-      // No configurations attached - let AI know
-      chatOptions.configHistory = "No configurations/devices are attached to this ticket.";
-    }
+    // Report API history for attached configurations. A role without report
+    // rights gets the "Unable to fetch configuration history" text.
+    chatOptions.configHistory = await getConfigHistoryText(
+      session,
+      ticketContext.configurations,
+      ticketId,
+      ticketContext.hidden?.includes("configurations")
+    );
   }
   
   // Build messages array with user's message

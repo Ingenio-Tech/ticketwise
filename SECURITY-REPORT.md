@@ -1,6 +1,6 @@
 # TicketWise Security Assessment Report
 
-**Date:** 2026-02-06 (initial) • 2026-02-07 (updated) • 2026-10-02 (updated)
+**Date:** 2026-02-06 (initial) • 2026-02-07 (updated) • 2026-10-02 (updated; ConnectWise calls run as the member)
 
 ---
 
@@ -73,7 +73,7 @@ Low risk: Next.js checks the Origin of Server Action requests, and every action 
 
 - ✅ No secrets in client bundles — env vars are server-side only (Zod validated)
 - ✅ Server-side member check: every Server Action verifies the member with ConnectWise before reading data
-- ✅ Member impersonation — all CW API calls use logged-in user's permissions
+- ✅ Calls run as the signed-in member: every CW API call sends the member's own verified Hosted API session, so ConnectWise applies their security role. (Corrected 2026-10-02: until then the calls used an API member's key with an `x-cw-memberhash` header, which ConnectWise ignores, so every call ran with the API member's rights.)
 - ✅ HTTP-only cookies — auth tokens not accessible to JavaScript
 - ✅ Zod validation on postMessage payloads and env vars
 - ✅ Non-root Docker container
@@ -85,10 +85,10 @@ Low risk: Next.js checks the Origin of Server Action requests, and every action 
 
 1. Tighten CSP `frame-ancestors` to your ConnectWise domain + your app domain
 2. Enforce TLS 1.2+ at your edge/reverse proxy
-3. Create a restricted CW API member with read-only permissions
+3. Review technicians' ConnectWise security roles, which decide what each technician sees in TicketWise. TicketWise needs no API member: remove any old `CW_PUBLIC_KEY` / `CW_PRIVATE_KEY` and revoke that key pair
 4. Monitor AI API usage for cost control
 
-> **Note:** Cloudflare Access / Azure AD App Proxy cannot be used — they break iframe-based CW pods. The security model relies on CW's own authentication, member impersonation, origin validation, and CSP `frame-ancestors`.
+> **Note:** Cloudflare Access / Azure AD App Proxy cannot be used: they break iframe-based CW pods. The security model relies on CW's own authentication, calls made with the signed-in member's own CW session, origin validation, and CSP `frame-ancestors`.
 
 ---
 

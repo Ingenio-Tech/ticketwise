@@ -4,13 +4,15 @@ export interface TicketContext {
   ticket: CWTicket;
   notes: CWTicketNote[];
   configurations: CWConfiguration[];
+  /** Parts the member's ConnectWise security role does not let them read. */
+  hidden?: Array<"notes" | "configurations">;
 }
 
 /**
  * Format ticket context as text for AI prompt.
  */
 export function formatTicketForAI(context: TicketContext): string {
-  const { ticket, notes, configurations } = context;
+  const { ticket, notes, configurations, hidden = [] } = context;
   
   let text = `# Ticket #${ticket.id}: ${ticket.summary}\n\n`;
   
@@ -83,6 +85,14 @@ export function formatTicketForAI(context: TicketContext): string {
       if (config.lastLoginName) text += `- **Last Login:** ${config.lastLoginName}\n`;
       if (config.notes) text += `- **Notes:** ${config.notes}\n`;
       text += `\n`;
+    }
+  }
+
+  // Say what the member's role hides, so the AI does not report it as empty.
+  if (hidden.length > 0) {
+    text += `\n## Not Available\n`;
+    for (const part of hidden) {
+      text += `- The technician's ConnectWise security role does not allow reading this ticket's ${part}.\n`;
     }
   }
   

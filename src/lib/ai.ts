@@ -2,7 +2,7 @@ import OpenRouterClient from "openai";
 import { env } from "./env";
 
 const llmClient = new OpenRouterClient({
-  baseURL: "https://openrouter.ai/api/v1",
+  baseURL: env.OPENROUTER_BASE_URL,
   apiKey: env.OPENROUTER_API_KEY,
   defaultHeaders: {
     "HTTP-Referer": "https://github.com/Ingenio-Tech/ticketwise",

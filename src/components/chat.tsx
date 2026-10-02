@@ -10,6 +10,8 @@ interface ChatProps {
   ticketId: number;
   isAuthenticated: boolean;
   credentials?: MemberCredentials;
+  /** Called when the server says the ConnectWise session has expired. */
+  onAuthExpired?: () => void;
 }
 
 interface Message {
@@ -25,7 +27,7 @@ interface SlashCommand {
   description: string;
 }
 
-export function Chat({ ticketId, isAuthenticated, credentials }: ChatProps) {
+export function Chat({ ticketId, isAuthenticated, credentials, onAuthExpired }: ChatProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -118,6 +120,9 @@ export function Chat({ ticketId, isAuthenticated, credentials }: ChatProps) {
 
       if (response.error) {
         setError(response.message);
+        // The member session expired or was refused: ask ConnectWise for
+        // fresh Hosted API credentials rather than waiting for a reload.
+        if (response.error === "unauthorised") onAuthExpired?.();
         return;
       }
       

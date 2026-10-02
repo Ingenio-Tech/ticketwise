@@ -44,8 +44,8 @@
 4. App stores frameID, marks ready
 5. App sends: { hosted_request: "getMemberAuthentication", frameID: "..." }
 6. CW responds with: { response: "getmemberauthentication", data: MemberAuth }
-7. App validates with Zod, stores in HTTP-only cookies (8hr expiry)
-8. All subsequent CW API calls include x-cw-memberhash header
+7. Server checks the credentials with CW (/system/myMembers/info, identity must match), then stores them in HTTP-only cookies (8hr expiry)
+8. Each Server Action re-checks the member (cached 5 min) and runs every CW call with that member's verified session
 ```
 
 Key protocol details:
@@ -69,10 +69,10 @@ Rate limit check (30/min per member)
 Detect slash command (if starts with /)
     │
     ▼
-Fetch ticket context (parallel):
-  ├── getTicket(id)
-  ├── getTicketNotes(id)
-  └── getTicketConfigurations(id)
+Fetch ticket context (parallel), as the member:
+  ├── getTicket(id)                  (403 stops the request)
+  ├── getTicketNotes(id)             (403: left out, marked hidden)
+  └── getTicketConfigurations(id)    (403: left out, marked hidden)
     │
     ▼
 Format ticket as markdown for AI
@@ -84,7 +84,8 @@ If /similar: searchSimilarTickets()
   └── Fetch notes for closed matches (to find actual resolution)
     │
 If /config: getConfigurationTickets()
-  └── Report API query by config_recids
+  ├── Report API query by config_recids (whole list item, re-checked in code)
+  └── /service/tickets?conditions=id in (...) keeps only tickets the member can open
     │
     ▼
 Build LLM chat messages:
@@ -117,7 +118,7 @@ src/
 │   └── use-hosted-api.ts       # CW postMessage handshake, origin validation
 │
 ├── lib/
-│   ├── env.ts                  # Zod env validation (CW creds, OpenRouter, Node)
+│   ├── env.ts                  # Zod env validation (CW settings, OpenRouter, Node)
 │   ├── ai.ts                   # OpenRouter client, system prompt, slash commands
 │   ├── connectwise.ts          # CW REST API client, types, search functions
 │   └── format.ts               # Ticket/note/config → markdown for AI context
@@ -136,21 +137,22 @@ src/
 |------|------|-----|
 | `pod.tsx`, `chat.tsx` | Client (`"use client"`) | Interactive UI, postMessage, DOM |
 | `use-hosted-api.ts` | Client | Browser postMessage API |
-| `auth.ts`, `chat.ts`, `ticket.ts` | Server (`"use server"`) | Cookies, API keys, CW credentials |
-| `ai.ts`, `connectwise.ts`, `env.ts`, `format.ts` | Server (imported by actions) | Secrets, external APIs |
+| `auth.ts`, `chat.ts` | Server (`"use server"`) | Cookies, member check, chat. Each action calls `requireMember()` first |
+| `ticket.ts` | Server helpers (never `"use server"`) | Called only by `processChat`, with a verified member session |
+| `ai.ts`, `connectwise.ts`, `env.ts`, `format.ts`, `session.ts` | Server (imported by actions) | LLM key, member session, external APIs. The only CW credentials are the member's own session |
 
 ## ConnectWise API Integration
 
 ### Authentication Method
 
-Basic Auth with member impersonation:
+Every call runs as the signed-in member, with the Hosted API credentials ConnectWise accepted when `lib/session.ts` verified them. ConnectWise applies the member's security role. There is no integration key.
 
 ```
-Authorization: Basic base64(companyId+publicKey:privateKey)
 clientId: CW_CLIENT_ID
-x-cw-usertype: member
-x-cw-memberhash: <memberId from cookies>
+Cookie: companyName=<CW_COMPANY_ID>; memberId=<member>; memberHash=<hash>; memberContext=<context>
 ```
+
+If ConnectWise accepted another form during verification (URL-encoded cookies, cookies without memberContext, or `Authorization: Basic base64(companyId+memberId:memberHash)`), data calls use that same form. A 401 means the session expired: the pod asks ConnectWise for fresh credentials and the server verifies them again. A 403 means the member's role does not allow the call.
 
 ### API Endpoints Used
 
@@ -161,7 +163,7 @@ x-cw-memberhash: <memberId from cookies>
 | `GET /service/tickets/{id}/configurations` | Attached configurations |
 | `GET /service/tickets?conditions=...` | Search similar tickets |
 | `GET /company/configurations/{id}` | Configuration details |
-| `GET /system/reports/Service` | Query tickets by config_recids (Report API) |
+| `GET /system/reports/Service` | Query tickets by config_recids (Report API; needs Report API rights in the member's role) |
 
 ### Similar Ticket Search
 
@@ -180,8 +182,6 @@ Results are sorted to prioritise closed/resolved tickets (they have solutions).
 | `CW_COMPANY_ID` | Yes | — | Company ID for API auth |
 | `CW_COMPANY_URL` | Yes | — | CW cloud instance (e.g. `eu.myconnectwise.net`) |
 | `CW_CODE_BASE` | No | `v4_6_release` | CW API version path |
-| `CW_PUBLIC_KEY` | Yes | — | API public key |
-| `CW_PRIVATE_KEY` | Yes | — | API private key |
 | `OPENROUTER_API_KEY` | Yes | — | OpenRouter API key (`sk-or-v1-...`) |
 | `OPENROUTER_MODEL` | No | `moonshotai/kimi-k2.5:nitro` | LLM model identifier |
 | `NODE_ENV` | No | `development` | Environment mode |

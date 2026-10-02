@@ -2,7 +2,6 @@ process.env.CW_CLIENT_ID = "test-client";
 process.env.CW_COMPANY_ID = "acme";
 process.env.CW_COMPANY_URL = "cw.example.test";
 process.env.CW_CODE_BASE = "v4_6_release";
-process.env.CW_PUBLIC_KEY = "pub"; process.env.CW_PRIVATE_KEY = "priv";
 process.env.OPENROUTER_API_KEY = "k";
 
 type Reply = { status: number; body?: unknown };
