@@ -27,6 +27,10 @@ const nextConfig: NextConfig = {
   
   // Disable Next.js default security headers that conflict with iframe embedding
   poweredByHeader: false,
+
+  // The app has no images to optimise; turning the optimiser off removes
+  // the /_next/image endpoint and its attack surface.
+  images: { unoptimized: true },
 };
 
 export default nextConfig;

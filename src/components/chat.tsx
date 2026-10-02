@@ -3,11 +3,13 @@
 import { useState, useRef, useEffect } from "react";
 import { processChat, getSlashCommands } from "@/actions/chat";
 import type { ChatMessage } from "@/lib/ai";
+import type { MemberCredentials } from "@/lib/session";
 import ReactMarkdown from "react-markdown";
 
 interface ChatProps {
   ticketId: number;
   isAuthenticated: boolean;
+  credentials?: MemberCredentials;
 }
 
 interface Message {
@@ -23,7 +25,7 @@ interface SlashCommand {
   description: string;
 }
 
-export function Chat({ ticketId, isAuthenticated }: ChatProps) {
+export function Chat({ ticketId, isAuthenticated, credentials }: ChatProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -32,16 +34,18 @@ export function Chat({ ticketId, isAuthenticated }: ChatProps) {
   const [showCommands, setShowCommands] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // Load slash commands (including client-side only commands)
+  // Load slash commands (including client-side only commands).
+  // The server only returns them once the member is verified.
   useEffect(() => {
-    getSlashCommands().then(serverCommands => {
+    if (!isAuthenticated) return;
+    getSlashCommands(credentials).then(serverCommands => {
       // Add client-side only commands
       const clientCommands = [
         { command: "/refresh", description: "Clear chat and start fresh" },
       ];
       setCommands([...clientCommands, ...serverCommands]);
-    });
-  }, []);
+    }).catch(err => console.error("Failed to load slash commands:", err));
+  }, [isAuthenticated, credentials]);
 
   // Auto-scroll to bottom - only when new messages added, not on every render
   const prevMessagesLength = useRef(messages.length);
@@ -110,7 +114,12 @@ export function Chat({ ticketId, isAuthenticated }: ChatProps) {
         ticketId,
         messages: chatHistory,
         userMessage,
-      });
+      }, credentials);
+
+      if (response.error) {
+        setError(response.message);
+        return;
+      }
       
       // Add assistant message
       const assistantMsg: Message = {

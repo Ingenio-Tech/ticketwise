@@ -1,4 +1,6 @@
-"use server";
+// Server-side helpers for processChat. This file is deliberately NOT a
+// "use server" module: its exports must never be callable from the browser.
+// Only processChat (which checks the member first) calls them.
 
 import {
   getTicket,

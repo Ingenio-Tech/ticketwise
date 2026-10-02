@@ -1,6 +1,6 @@
 "use server";
 
-import { cookies } from "next/headers";
+import { z } from "zod";
 import { chat, SLASH_COMMANDS, type ChatMessage } from "@/lib/ai";
 import {
   getTicketContext,
@@ -10,29 +10,69 @@ import {
 } from "./ticket";
 import { formatTicketForAI, formatSimilarTickets, formatSimilarTicketsWithNotes } from "@/lib/format";
 import type { CWTicket } from "@/lib/connectwise";
+import { AuthError, requireMember, type MemberCredentials } from "@/lib/session";
 
-// Simple in-memory rate limiter
-// In production, consider using Redis for distributed rate limiting
+// Simple in-memory rate limiter, keyed on the ConnectWise-verified member.
+// In production, consider using Redis for distributed rate limiting.
 const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
-const RATE_LIMIT = 30; // requests per window
+const RATE_LIMIT = 30; // requests per member per window
+const GLOBAL_RATE_LIMIT = 120; // requests across all members per window
 const RATE_WINDOW = 60 * 1000; // 1 minute
+const MAX_TRACKED_MEMBERS = 1000;
+let globalWindow = { count: 0, resetTime: 0 };
 
 function checkRateLimit(identifier: string): { allowed: boolean; remaining: number } {
   const now = Date.now();
+
+  if (now > globalWindow.resetTime) {
+    globalWindow = { count: 0, resetTime: now + RATE_WINDOW };
+  }
+  if (globalWindow.count >= GLOBAL_RATE_LIMIT) {
+    return { allowed: false, remaining: 0 };
+  }
+
+  // Keep the map bounded: drop expired entries, then the oldest.
+  if (rateLimitMap.size > MAX_TRACKED_MEMBERS) {
+    for (const [key, value] of rateLimitMap) {
+      if (now > value.resetTime) rateLimitMap.delete(key);
+    }
+    while (rateLimitMap.size > MAX_TRACKED_MEMBERS) {
+      const oldest = rateLimitMap.keys().next().value;
+      if (oldest === undefined) break;
+      rateLimitMap.delete(oldest);
+    }
+  }
+
   const entry = rateLimitMap.get(identifier);
-  
+
   if (!entry || now > entry.resetTime) {
     rateLimitMap.set(identifier, { count: 1, resetTime: now + RATE_WINDOW });
+    globalWindow.count++;
     return { allowed: true, remaining: RATE_LIMIT - 1 };
   }
-  
+
   if (entry.count >= RATE_LIMIT) {
     return { allowed: false, remaining: 0 };
   }
-  
+
   entry.count++;
+  globalWindow.count++;
   return { allowed: true, remaining: RATE_LIMIT - entry.count };
 }
+
+// Everything in a Server Action request is attacker-controlled, so check it.
+const ChatRequestSchema = z.object({
+  ticketId: z.number().int().positive().max(2_147_483_647),
+  messages: z
+    .array(
+      z.object({
+        role: z.enum(["user", "assistant"]),
+        content: z.string().max(8000),
+      })
+    )
+    .max(50),
+  userMessage: z.string().min(1).max(4000),
+});
 
 export interface ChatRequest {
   ticketId: number;
@@ -43,6 +83,7 @@ export interface ChatRequest {
 export interface ChatResponse {
   message: string;
   slashCommand?: string;
+  error?: "unauthorised" | "invalid" | "rate_limited";
 }
 
 /**
@@ -64,20 +105,40 @@ function detectSlashCommand(message: string): { command: string | null; content:
 /**
  * Process a chat message and return AI response.
  */
-export async function processChat(request: ChatRequest): Promise<ChatResponse> {
-  // Rate limiting based on member ID
-  const cookieStore = await cookies();
-  const memberId = cookieStore.get("memberId")?.value || "anonymous";
-  const { allowed, remaining } = checkRateLimit(memberId);
-  
+export async function processChat(request: ChatRequest, auth?: MemberCredentials): Promise<ChatResponse> {
+  // 1. Prove the caller is a signed-in ConnectWise member before any
+  //    ConnectWise or LLM call.
+  let memberId: string;
+  try {
+    ({ memberId } = await requireMember(auth));
+  } catch (err) {
+    if (err instanceof AuthError) {
+      return {
+        message: "Your ConnectWise session could not be verified. Reload the ticket and try again.",
+        error: "unauthorised",
+      };
+    }
+    throw err;
+  }
+
+  // 2. Rate limit on the verified member.
+  const { allowed } = checkRateLimit(memberId.toLowerCase());
+
   if (!allowed) {
     return {
       message: "Rate limit exceeded. Please wait a moment before sending more messages.",
       slashCommand: undefined,
+      error: "rate_limited",
     };
   }
-  
-  const { ticketId, messages, userMessage } = request;
+
+  // 3. Validate the request body.
+  const parsed = ChatRequestSchema.safeParse(request);
+  if (!parsed.success) {
+    return { message: "Invalid request.", error: "invalid" };
+  }
+
+  const { ticketId, messages, userMessage } = parsed.data;
   
   // Detect slash command
   const { command, content } = detectSlashCommand(userMessage);
@@ -203,7 +264,13 @@ export async function processChat(request: ChatRequest): Promise<ChatResponse> {
 /**
  * Get available slash commands.
  */
-export async function getSlashCommands(): Promise<Array<{ command: string; description: string }>> {
+export async function getSlashCommands(auth?: MemberCredentials): Promise<Array<{ command: string; description: string }>> {
+  try {
+    await requireMember(auth);
+  } catch (err) {
+    if (err instanceof AuthError) return [];
+    throw err;
+  }
   return Object.entries(SLASH_COMMANDS).map(([cmd, info]) => ({
     command: cmd,
     description: info.description,

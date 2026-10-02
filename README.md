@@ -210,10 +210,12 @@ TicketWise is designed to be safe by default, but **you are responsible for secu
 
 **What the app does right:**
 - All API keys stay server-side (validated by Zod, never in client bundles)
+- Every Server Action checks the member with ConnectWise first (`src/lib/session.ts`): the Hosted API memberId/memberHash pair must pass a CW API call before any ticket data is read or the LLM is called. Good checks are cached for 5 minutes
+- Server Action input is validated with Zod (integer ticket IDs, `user`/`assistant` roles only, length caps)
 - ConnectWise API calls use member impersonation (respects the logged-in user's permissions)
 - PostMessage origin validation (only accepts messages from ConnectWise domains)
 - HTTP-only, secure cookies with 8-hour expiry
-- Rate limiting (30 req/min per user)
+- Rate limiting (30 req/min per verified member, 120 req/min overall)
 - Non-root Docker container
 - Read-only — no write operations to ConnectWise
 - Security headers: CSP, X-Content-Type-Options, Referrer-Policy, Permissions-Policy

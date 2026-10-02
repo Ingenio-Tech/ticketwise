@@ -1,6 +1,6 @@
 # TicketWise Security Assessment Report
 
-**Date:** 2026-02-06 (initial) • 2026-02-07 (updated)
+**Date:** 2026-02-06 (initial) • 2026-02-07 (updated) • 2026-10-02 (updated)
 
 ---
 
@@ -10,7 +10,7 @@ Overall security posture is **GOOD**. All high and medium priority findings have
 
 | Severity | Original | Current |
 |----------|----------|---------|
-| 🔴 Critical | 0 | 0 |
+| 🔴 Critical | 1 | 0 ✅ |
 | 🟠 High | 1 | 0 ✅ |
 | 🟡 Medium | 3 | 0 ✅ |
 | 🔵 Low | 4 | 4 |
@@ -19,6 +19,12 @@ Overall security posture is **GOOD**. All high and medium priority findings have
 ---
 
 ## Resolved Findings
+
+### ✅ Unauthenticated Server Actions (was CRITICAL, fixed 2026-10-02)
+
+Server Actions are public HTTP endpoints. Before this fix, `processChat` and `getSlashCommands` ran for any caller on the internet, read ConnectWise tickets, notes and configurations with the integration key, and called the LLM. The "Pod Mode Only" screen only blocked the browser view.
+
+Every action now calls `requireMember()` in `src/lib/session.ts` first. It proves the Hosted API memberId, memberHash and memberContext with a ConnectWise API call before any ticket data is read. Server Action input is checked with Zod, and Next.js is pinned to 15.5.27. If you run TicketWise, update to this version.
 
 ### ✅ PostMessage Origin Validation (was HIGH)
 
@@ -51,7 +57,7 @@ Required for cross-site iframe usage. Mitigated by `httpOnly: true` and `secure:
 
 ### 🔵 LOW: No CSRF Protection
 
-Low risk since standalone access is blocked and cookies require the CW iframe context.
+Low risk: Next.js checks the Origin of Server Action requests, and every action verifies the member with ConnectWise.
 
 ### 🔵 LOW: Technology Stack Disclosure
 
@@ -66,7 +72,7 @@ Low risk since standalone access is blocked and cookies require the CW iframe co
 ## Positive Security Properties
 
 - ✅ No secrets in client bundles — env vars are server-side only (Zod validated)
-- ✅ Standalone access blocked — shows "Pod Mode Only" outside CW iframe
+- ✅ Server-side member check: every Server Action verifies the member with ConnectWise before reading data
 - ✅ Member impersonation — all CW API calls use logged-in user's permissions
 - ✅ HTTP-only cookies — auth tokens not accessible to JavaScript
 - ✅ Zod validation on postMessage payloads and env vars

@@ -111,7 +111,8 @@ export function useHostedApi(options: UseHostedApiOptions = {}): UseHostedApiRet
 
     const handleMessage = (event: MessageEvent) => {
       // Validate origin - only accept messages from ConnectWise domains
-      if (!ALLOWED_ORIGINS.some(origin => event.origin.startsWith(origin))) {
+      // Exact match: startsWith would also accept https://eu.myconnectwise.net.evil.example
+      if (!ALLOWED_ORIGINS.includes(event.origin)) {
         return; // Silently ignore messages from unknown origins
       }
       

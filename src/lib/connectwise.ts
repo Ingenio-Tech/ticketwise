@@ -174,11 +174,21 @@ export interface CWConfiguration {
 
 // ============ API Functions ============
 
+// IDs go into URL paths and report conditions, so they must be plain
+// positive integers (a string like "1/../../system" must never get through).
+function assertId(id: unknown): asserts id is number {
+  if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) {
+    throw new Error("Invalid ConnectWise record id");
+  }
+}
+
 export async function getTicket(ticketId: number): Promise<CWTicket> {
+  assertId(ticketId);
   return cwGet<CWTicket>(`/service/tickets/${ticketId}`);
 }
 
 export async function getTicketNotes(ticketId: number): Promise<CWTicketNote[]> {
+  assertId(ticketId);
   // Use allNotes endpoint to get all note types (description, internal, resolution, etc.)
   // Note: allNotes doesn't support orderBy, so we sort client-side
   const notes = await cwGet<CWTicketNote[]>(`/service/tickets/${ticketId}/allNotes`, {
@@ -194,6 +204,7 @@ export async function getTicketNotes(ticketId: number): Promise<CWTicketNote[]> 
 }
 
 export async function getTicketConfigurations(ticketId: number): Promise<CWConfiguration[]> {
+  assertId(ticketId);
   return cwGet<CWConfiguration[]>(`/service/tickets/${ticketId}/configurations`);
 }
 
@@ -202,6 +213,7 @@ export async function searchTickets(conditions: string, options?: Omit<CWRequest
 }
 
 export async function getConfiguration(configId: number): Promise<CWConfiguration> {
+  assertId(configId);
   return cwGet<CWConfiguration>(`/company/configurations/${configId}`);
 }
 
@@ -212,6 +224,7 @@ interface ServiceReportResponse {
 }
 
 export async function getConfigurationTickets(configId: number, limit: number = 30): Promise<CWTicket[]> {
+  assertId(configId);
   // Use the Service Report API to query tickets by config_recids
   // This is MUCH more efficient than checking each ticket individually
   

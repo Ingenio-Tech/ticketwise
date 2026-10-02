@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { useHostedApi, type MemberAuth } from "@/hooks/use-hosted-api";
 import { setAuthCookies, checkAuth } from "@/actions/auth";
 import { Chat } from "./chat";
@@ -26,7 +26,21 @@ export function Pod({ ticketId: propTicketId, screen: propScreen }: PodProps) {
   
   const handleAuth = useCallback(async (auth: MemberAuth) => {
     try {
-      await setAuthCookies(auth);
+      // Send only what the server needs to verify the member (no SSO tokens).
+      const result = await setAuthCookies({
+        codeBase: auth.codeBase,
+        companyid: auth.companyid,
+        memberContext: auth.memberContext,
+        memberEmail: auth.memberEmail,
+        memberid: auth.memberid,
+        memberHash: auth.memberHash,
+        site: auth.site,
+      });
+      if (!result.success) {
+        setIsAuthenticated(false);
+        setAuthError(result.error || "Could not verify your ConnectWise session");
+        return;
+      }
       setIsAuthenticated(true);
       setAuthError(null);
     } catch (err) {
@@ -50,6 +64,17 @@ export function Pod({ ticketId: propTicketId, screen: propScreen }: PodProps) {
     onError: handleError,
   });
   
+  // Hosted API credentials held in memory. Chat sends them with each server
+  // call so the server can verify the member even if the browser blocks
+  // cookies in this cross-site iframe.
+  const credentials = useMemo(
+    () =>
+      auth
+        ? { memberId: auth.memberid, memberHash: auth.memberHash, memberContext: auth.memberContext }
+        : undefined,
+    [auth]
+  );
+
   // Derive ticket ID from screen object or props
   const ticketId = screenObject?.id ? Number(screenObject.id) : propTicketId;
   const screen = screenObject?.screen || propScreen || "ticket";
@@ -171,7 +196,7 @@ export function Pod({ ticketId: propTicketId, screen: propScreen }: PodProps) {
 
   return (
     <div className="h-full">
-      <Chat ticketId={ticketId} isAuthenticated={isAuthenticated} />
+      <Chat ticketId={ticketId} isAuthenticated={isAuthenticated} credentials={credentials} />
     </div>
   );
 }

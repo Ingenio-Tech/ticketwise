@@ -15,7 +15,8 @@ The app requires a ConnectWise iframe context to authenticate. Running standalon
 ## Key Architecture
 
 - **Client components** (`pod.tsx`, `chat.tsx`, `use-hosted-api.ts`): UI and CW postMessage handshake
-- **Server actions** (`actions/auth.ts`, `actions/chat.ts`, `actions/ticket.ts`): All CW API calls, cookie management, AI calls
+- **Server actions** (`actions/auth.ts`, `actions/chat.ts`): cookie management, chat, AI calls. Every exported action is callable by anyone on the internet, so each one that reaches CW or the LLM must call `requireMember()` from `lib/session.ts` first. `actions/ticket.ts` holds plain server helpers (not `"use server"`), so they are not callable from the browser.
+- **Member check** (`lib/session.ts`): proves the Hosted API memberId/memberHash/memberContext with a CW call to `/system/info` (cookie auth), company always from `CW_COMPANY_ID`. Good results are cached 5 minutes; bad ones 1 minute, with per-member and global failure limits.
 - **Libraries** (`lib/ai.ts`, `lib/connectwise.ts`, `lib/env.ts`, `lib/format.ts`): OpenRouter client, CW REST client, env validation, data formatting
 
 AI calls go through OpenRouter via the OpenAI-compatible SDK (`openai` npm package with `baseURL: "https://openrouter.ai/api/v1"`).
@@ -50,6 +51,7 @@ Edit `SYSTEM_PROMPT` in `src/lib/ai.ts`. The prompt enforces British English, Ma
 - **Similar ticket search**: Extracts keywords from summary, filters stop words, searches CW with `like` conditions. Results sorted closed-first.
 - **Report API**: Used for config ticket history (`/system/reports/Service`) because it supports querying by `config_recids` — the main tickets API doesn't.
 - **Nixpacks start command**: Keep `"start": "next start"` in package.json. `node .next/standalone/server.js` breaks static file serving under Nixpacks.
+- **Adding a Server Action**: start it with `await requireMember(credentials)` and validate its input with Zod. Never add `"use server"` to a module whose exports skip that check.
 
 ## Testing
 
