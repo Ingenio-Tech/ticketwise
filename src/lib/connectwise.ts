@@ -22,9 +22,14 @@ type CWRequestOptions = {
   page?: number;
   fields?: string[];
   columns?: string[];
+  /** Overrides CW_TIMEOUT_MS for slow endpoints. Not sent to ConnectWise. */
+  timeoutMs?: number;
 };
 
 const CW_TIMEOUT_MS = 15000;
+// The Service report scans every ticket's config_recids; it takes 15 to 20
+// seconds on Ingenio's tenant (measured 3 Oct 2026).
+const CW_REPORT_TIMEOUT_MS = 60000;
 
 export const CW_FORBIDDEN_MESSAGE = "Your ConnectWise security role does not allow this.";
 
@@ -93,10 +98,11 @@ async function cwRequest<T>(
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
       cache: "no-store",
-      signal: AbortSignal.timeout(CW_TIMEOUT_MS),
+      signal: AbortSignal.timeout(options?.timeoutMs ?? CW_TIMEOUT_MS),
     });
-  } catch {
-    console.warn(`${label} -> network error`);
+  } catch (err) {
+    const timedOut = err instanceof Error && err.name === "TimeoutError";
+    console.warn(`${label} -> ${timedOut ? "timed out" : "network error"}`);
     throw new CwApiError(0);
   }
 
@@ -305,6 +311,7 @@ export async function getConfigurationTickets(
     conditions,
     orderBy: "TicketNbr desc",
     pageSize: limit,
+    timeoutMs: CW_REPORT_TIMEOUT_MS,
   });
 
   // Map column names to indices
