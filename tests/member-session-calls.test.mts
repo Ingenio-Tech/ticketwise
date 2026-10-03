@@ -34,7 +34,7 @@ type Reply = { status: number; body?: unknown; raw?: string };
 type Seen = { url: string; path: string; method: string; headers: Record<string, string> };
 const seen: Seen[] = [];
 let dataReply: (s: Seen) => Reply = () => ({ status: 200, body: {} });
-let infoReply: (s: Seen) => Reply = () => ({ status: 200, body: { identifier: "SSmyth" } });
+let infoReply: (s: Seen) => Reply = () => ({ status: 200, body: { identifier: "JSmith" } });
 
 (globalThis as any).fetch = async (url: string, init: any = {}) => {
   const u = new URL(url);
@@ -80,8 +80,8 @@ function noIntegrationKey(calls: Seen[]) {
 }
 
 async function newSession(n: number, memberContext = "Q7z") {
-  infoReply = () => ({ status: 200, body: { identifier: "SSmyth" } });
-  return session.verifyMember({ memberId: "SSmyth", memberHash: hash(n), memberContext });
+  infoReply = () => ({ status: 200, body: { identifier: "JSmith" } });
+  return session.verifyMember({ memberId: "JSmith", memberHash: hash(n), memberContext });
 }
 
 const REPORT_COLUMNS = ["TicketNbr", "Summary", "date_entered", "Closed_Flag", "status_description", "config_recids"];
@@ -111,7 +111,7 @@ await t("data calls send the member's cookies and no Authorization / integration
   const h = calls[0].headers;
   assert(calls[0].path === "/service/tickets/5", "wrong path " + calls[0].path);
   assert(h.clientId === "test-client", "clientId header missing");
-  assert(h.Cookie === `companyName=acme; memberId=SSmyth; memberHash=${hash(1)}; memberContext=Q7z`, "cookie not the verified session: " + h.Cookie);
+  assert(h.Cookie === `companyName=acme; memberId=JSmith; memberHash=${hash(1)}; memberContext=Q7z`, "cookie not the verified session: " + h.Cookie);
   assert(!("Authorization" in h), "Authorization header sent: " + h.Authorization);
   noIntegrationKey(calls);
 });
@@ -129,7 +129,7 @@ await t("every helper in the ticket context runs with the member session", async
 
 await t("a call without a verified session never reaches ConnectWise", async () => {
   seen.length = 0;
-  const forged = { memberId: "SSmyth", memberHash: hash(3), memberContext: "Q7z", method: "cookie" };
+  const forged = { memberId: "JSmith", memberHash: hash(3), memberContext: "Q7z", method: "cookie" };
   for (const bad of [undefined, null, forged]) {
     let err: unknown;
     try { await cw.getTicket(bad, 5); } catch (e) { err = e; }
@@ -139,8 +139,8 @@ await t("a call without a verified session never reaches ConnectWise", async () 
 });
 
 await t("a CW 401 on a data call throws AuthError and drops the cached session", async () => {
-  const creds = { memberId: "SSmyth", memberHash: hash(4), memberContext: "Q7z" };
-  infoReply = () => ({ status: 200, body: { identifier: "SSmyth" } });
+  const creds = { memberId: "JSmith", memberHash: hash(4), memberContext: "Q7z" };
+  infoReply = () => ({ status: 200, body: { identifier: "JSmith" } });
   const s = await session.verifyMember(creds);
   dataReply = () => ({ status: 401, body: { code: "Unauthorized", message: "CW-BODY-SECRET" } });
   let err: any;
@@ -162,22 +162,22 @@ await t("a CW 403 on a data call gives the plain role message, not CW's body", a
 });
 
 await t("processChat: a CW 403 gives the user the friendly message", async () => {
-  infoReply = () => ({ status: 200, body: { identifier: "SSmyth" } });
+  infoReply = () => ({ status: 200, body: { identifier: "JSmith" } });
   dataReply = () => ({ status: 403, body: { code: "Forbidden", message: "CW-BODY-SECRET" } });
   const r = await chat.processChat(
     { ticketId: 77, messages: [], userMessage: "hello" },
-    { memberId: "SSmyth", memberHash: hash(6), memberContext: "Q7z" }
+    { memberId: "JSmith", memberHash: hash(6), memberContext: "Q7z" }
   );
   assert(r.error === "forbidden", "error: " + r.error);
   assert(r.message === "Your ConnectWise security role does not allow this.", "message: " + r.message);
 });
 
 await t("processChat: a CW 401 on a data call asks for fresh auth (unauthorised)", async () => {
-  infoReply = () => ({ status: 200, body: { identifier: "SSmyth" } });
+  infoReply = () => ({ status: 200, body: { identifier: "JSmith" } });
   dataReply = () => ({ status: 401, body: { code: "Unauthorized", message: "CW-BODY-SECRET" } });
   const r = await chat.processChat(
     { ticketId: 78, messages: [], userMessage: "hello" },
-    { memberId: "SSmyth", memberHash: hash(7), memberContext: "Q7z" }
+    { memberId: "JSmith", memberHash: hash(7), memberContext: "Q7z" }
   );
   assert(r.error === "unauthorised", "error: " + r.error);
   assert(!r.message.includes("CW-BODY-SECRET"), "CW body leaked");
@@ -190,8 +190,8 @@ await t("data calls log method, path, member and status only", async () => {
   await cw.getTicket(s, 5);
   dataReply = () => ({ status: 403, body: { message: "CW-BODY-SECRET" } });
   await cw.getTicket(s, 6).catch(() => undefined);
-  assert(logs.includes("[cw] GET /service/tickets/5 as SSmyth -> 200"), "missing 200 log line: " + JSON.stringify(logs));
-  assert(logs.includes("[cw] GET /service/tickets/6 as SSmyth -> 403"), "missing 403 log line: " + JSON.stringify(logs));
+  assert(logs.includes("[cw] GET /service/tickets/5 as JSmith -> 200"), "missing 200 log line: " + JSON.stringify(logs));
+  assert(logs.includes("[cw] GET /service/tickets/6 as JSmith -> 403"), "missing 403 log line: " + JSON.stringify(logs));
   for (const line of logs) {
     assert(!line.includes(hash(8)), "hash logged: " + line);
     assert(!line.includes("Q7z"), "memberContext logged: " + line);
@@ -305,26 +305,26 @@ await t("a cached member presented with a different hash goes back to CW and is 
 });
 
 await t("data calls send the memberId exactly as verified; logs use CW's spelling", async () => {
-  infoReply = () => ({ status: 200, body: { identifier: "SSmyth" } });
+  infoReply = () => ({ status: 200, body: { identifier: "JSmith" } });
   seen.length = 0;
-  const s = await session.verifyMember({ memberId: "ssmyth", memberHash: hash(22), memberContext: "Q7z" });
-  assert(s.memberId === "SSmyth", "session.memberId " + s.memberId);
+  const s = await session.verifyMember({ memberId: "jsmith", memberHash: hash(22), memberContext: "Q7z" });
+  assert(s.memberId === "JSmith", "session.memberId " + s.memberId);
   const proven = seen.find((c) => c.path === "/system/myMembers/info");
-  assert(proven?.headers.Cookie?.includes("memberId=ssmyth;"), "verification cookie: " + proven?.headers.Cookie);
+  assert(proven?.headers.Cookie?.includes("memberId=jsmith;"), "verification cookie: " + proven?.headers.Cookie);
   seen.length = 0;
   logs.length = 0;
   dataReply = () => ({ status: 200, body: { id: 5, summary: "x" } });
   await cw.getTicket(s, 5);
   assert(dataCalls()[0].headers.Cookie === proven!.headers.Cookie, "data cookie differs from the one CW accepted: " + dataCalls()[0].headers.Cookie);
-  assert(logs.includes("[cw] GET /service/tickets/5 as SSmyth -> 200"), "log line: " + JSON.stringify(logs));
+  assert(logs.includes("[cw] GET /service/tickets/5 as JSmith -> 200"), "log line: " + JSON.stringify(logs));
 });
 
 await t("a session verified in the URL-encoded cookie form sends that exact cookie on data calls", async () => {
   const ctx = "a=b/c+d";
   const enc = encodeURIComponent(ctx);
-  infoReply = (c) => (c.headers.Cookie?.includes(`memberContext=${enc}`) ? { status: 200, body: { identifier: "SSmyth" } } : { status: 401 });
+  infoReply = (c) => (c.headers.Cookie?.includes(`memberContext=${enc}`) ? { status: 200, body: { identifier: "JSmith" } } : { status: 401 });
   seen.length = 0;
-  const s = await session.verifyMember({ memberId: "SSmyth", memberHash: hash(23), memberContext: ctx });
+  const s = await session.verifyMember({ memberId: "JSmith", memberHash: hash(23), memberContext: ctx });
   assert(s.method === "cookie-encoded", "method " + s.method);
   const proven = seen.find((c) => c.path === "/system/myMembers/info" && c.headers.Cookie?.includes(enc));
   assert(proven, "no encoded verification call");
@@ -345,12 +345,12 @@ await t("a 200 with a body that is not JSON gives CwApiError and logs none of th
   try { await cw.getTicket(s, 5); } catch (e) { err = e; }
   assert(err instanceof cw.CwApiError, "not a CwApiError: " + err?.name);
   assert(!/DOCTYPE|CW-BODY-SECRET/.test(err.message), "body in error: " + err.message);
-  assert(logs.includes("[cw] GET /service/tickets/5 as SSmyth -> 200 (invalid JSON)"), "log line: " + JSON.stringify(logs));
+  assert(logs.includes("[cw] GET /service/tickets/5 as JSmith -> 200 (invalid JSON)"), "log line: " + JSON.stringify(logs));
   for (const line of logs) assert(!/DOCTYPE|CW-BODY-SECRET/.test(line), "body logged: " + line);
 });
 
 await t("a role without notes or configurations rights still gets an answer", async () => {
-  infoReply = () => ({ status: 200, body: { identifier: "SSmyth" } });
+  infoReply = () => ({ status: 200, body: { identifier: "JSmith" } });
   dataReply = (c) =>
     c.path === "/service/tickets/79"
       ? { status: 200, body: { id: 79, summary: "Printer offline" } }
@@ -358,7 +358,7 @@ await t("a role without notes or configurations rights still gets an answer", as
   llmRequests.length = 0;
   const r = await chat.processChat(
     { ticketId: 79, messages: [], userMessage: "hello" },
-    { memberId: "SSmyth", memberHash: hash(16), memberContext: "Q7z" }
+    { memberId: "JSmith", memberHash: hash(16), memberContext: "Q7z" }
   );
   assert(!r.error, "error: " + r.error + " " + r.message);
   assert(r.message === "stub answer", "message: " + r.message);
@@ -369,7 +369,7 @@ await t("a role without notes or configurations rights still gets an answer", as
 });
 
 await t("/config with configurations hidden says so and makes no Report API call", async () => {
-  infoReply = () => ({ status: 200, body: { identifier: "SSmyth" } });
+  infoReply = () => ({ status: 200, body: { identifier: "JSmith" } });
   dataReply = (c) =>
     c.path === "/service/tickets/80"
       ? { status: 200, body: { id: 80, summary: "Laptop slow" } }
@@ -380,7 +380,7 @@ await t("/config with configurations hidden says so and makes no Report API call
   seen.length = 0;
   const r = await chat.processChat(
     { ticketId: 80, messages: [], userMessage: "/config" },
-    { memberId: "SSmyth", memberHash: hash(17), memberContext: "Q7z" }
+    { memberId: "JSmith", memberHash: hash(17), memberContext: "Q7z" }
   );
   assert(!r.error, "error: " + r.error + " " + r.message);
   assert(r.slashCommand === "/config", "slashCommand " + r.slashCommand);
@@ -405,14 +405,14 @@ await t("CW error text in the verification log cannot add lines or show the hash
 
 // Last: once a member verifies by Basic auth the pod prefers it for everyone.
 await t("a Basic-auth member session sends companyId+memberId:memberHash, never the integration key", async () => {
-  infoReply = (c) => (c.headers.Authorization ? { status: 200, body: { identifier: "SSmyth" } } : { status: 401 });
-  const s = await session.verifyMember({ memberId: "SSmyth", memberHash: hash(12), memberContext: "Q7z" });
+  infoReply = (c) => (c.headers.Authorization ? { status: 200, body: { identifier: "JSmith" } } : { status: 401 });
+  const s = await session.verifyMember({ memberId: "JSmith", memberHash: hash(12), memberContext: "Q7z" });
   assert(s.method === "basic", "method " + s.method);
   seen.length = 0;
   dataReply = () => ({ status: 200, body: { id: 5, summary: "x" } });
   await cw.getTicket(s, 5);
   const h = dataCalls()[0].headers;
-  assert(h.Authorization === `Basic ${Buffer.from(`acme+SSmyth:${hash(12)}`).toString("base64")}`, "wrong Basic header");
+  assert(h.Authorization === `Basic ${Buffer.from(`acme+JSmith:${hash(12)}`).toString("base64")}`, "wrong Basic header");
   noIntegrationKey(dataCalls());
 });
 

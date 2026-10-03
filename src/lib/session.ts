@@ -189,8 +189,8 @@ function issue(c: MemberCredentials, identifier: string, method: Method): Member
     method,
   });
   // Data calls send these exact bytes, the ones /system/myMembers/info
-  // accepted, even where CW spells the member differently (e.g. "ssmyth"
-  // claimed, "SSmyth" returned). session.memberId is CW's spelling, for logs.
+  // accepted, even where CW spells the member differently (e.g. "jsmith"
+  // claimed, "JSmith" returned). session.memberId is CW's spelling, for logs.
   const creds = Object.freeze({ memberId: c.memberId, memberHash: c.memberHash, memberContext: c.memberContext });
   issued.set(session, { method, creds });
   return session;
